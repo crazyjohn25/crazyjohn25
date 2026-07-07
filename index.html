@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/style.css?v=3" />
   <!-- TradingView 开源图表库 lightweight-charts -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -14,7 +14,14 @@
     <div class="brand">K线智能分析终端</div>
     <div class="controls">
       <label>品种
-        <select id="symbolSelect"></select>
+        <!-- 静态兜底选项，脚本加载后会按注册表重建，防止缓存不一致时下拉为空 -->
+        <select id="symbolSelect">
+          <option value="BTCUSDT">BTC/USDT</option>
+          <option value="ETHUSDT">ETH/USDT</option>
+          <option value="SOLUSDT">SOL/USDT</option>
+          <option value="BNBUSDT">BNB/USDT</option>
+          <option value="HYPE">HYPE/USDC (Hyperliquid)</option>
+        </select>
       </label>
       <label>周期
         <select id="intervalSelect">
@@ -122,6 +129,6 @@
   <div id="toastContainer" class="toast-container"></div>
   <div id="tooltip" class="tooltip hidden"></div>
 
-  <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/app.js?v=3"></script>
 </body>
 </html>

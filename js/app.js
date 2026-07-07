@@ -160,7 +160,9 @@ async function loadSymbol() {
   refreshNews();
 }
 
-function onRealtimeBar(bar) {
+let lastFullRender = 0;
+
+function onRealtimeBar(bar, isClosed) {
   const last = state.candles[state.candles.length - 1];
   if (last && bar.time === last.time) {
     state.candles[state.candles.length - 1] = bar;
@@ -170,12 +172,41 @@ function onRealtimeBar(bar) {
   } else {
     return;
   }
-  recomputeAndRender({ fitContent: false });
+
+  // 每个tick只做轻量增量更新（O(1)），避免全量重算导致卡顿
+  candleSeries.update(bar);
+  volumeSeries.update({
+    time: bar.time,
+    value: bar.volume,
+    color: bar.close >= bar.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)',
+  });
+
+  // 指标/信号/异动/侧栏的全量重算：仅在K线收盘或距上次超过5秒时进行
+  const now = Date.now();
+  if (isClosed || now - lastFullRender > 5000) {
+    lastFullRender = now;
+    recomputeAndRender({ fitContent: false });
+  }
 }
 
+let whaleRenderQueued = false;
 function onWhaleTrade(trade) {
   whaleFeed.push(trade);
-  renderWhaleList();
+  // 合并高频推送，最多每秒渲染一次
+  if (whaleRenderQueued) return;
+  whaleRenderQueued = true;
+  setTimeout(() => {
+    whaleRenderQueued = false;
+    renderWhaleList();
+  }, 1000);
+}
+
+/** innerHTML 只在内容变化时才写入，避免无谓的DOM重建 */
+function setHtmlIfChanged(el, html) {
+  if (el.__lastHtml === html) return false;
+  el.__lastHtml = html;
+  el.innerHTML = html;
+  return true;
 }
 
 // ---------------- 计算 + 渲染 ----------------
@@ -385,20 +416,23 @@ function renderVolumePanel() {
 function renderAnomalyList() {
   const ul = $('anomalyList');
   const recent = state.anomalies.slice(0, 8);
-  ul.innerHTML = recent
-    .map(
-      (a) =>
-        `<li><span class="anomaly-tag">${a.type === 'both' ? '量价异动' : a.type === 'volume' ? '放量' : '价格异动'}</span>` +
-        `${escapeHtml(a.desc)}<br><span class="time">${formatTime(a.time)}</span></li>`
-    )
-    .join('');
-  if (recent.length === 0) ul.innerHTML = '<li class="reasons">当前周期暂无量价异动</li>';
+  const html =
+    recent.length === 0
+      ? '<li class="reasons">当前周期暂无量价异动</li>'
+      : recent
+          .map(
+            (a) =>
+              `<li><span class="anomaly-tag">${a.type === 'both' ? '量价异动' : a.type === 'volume' ? '放量' : '价格异动'}</span>` +
+              `${escapeHtml(a.desc)}<br><span class="time">${formatTime(a.time)}</span></li>`
+          )
+          .join('');
+  setHtmlIfChanged(ul, html);
 }
 
 function renderWhaleList() {
   const ul = $('whaleList');
   const recent = whaleFeed.trades.slice(0, 8);
-  ul.innerHTML = recent
+  const html = recent
     .map(
       (t) =>
         `<li><span class="whale-${t.side}">${t.side === 'buy' ? '⬆ 大额买入' : '⬇ 大额卖出'}</span>` +
@@ -406,6 +440,7 @@ function renderWhaleList() {
         `<br><span class="time">${formatTime(t.time)} · ${t.source}</span></li>`
     )
     .join('');
+  setHtmlIfChanged(ul, html);
 }
 
 // ---------------- 标注：信号 + 宏观事件 ----------------
@@ -512,22 +547,25 @@ function escapeHtml(s) {
 function renderSignalList() {
   const ul = $('signalList');
   const recent = state.signals.slice(-20).reverse();
-  ul.innerHTML = recent
-    .map(
-      (s) =>
-        `<li><span class="side-${s.side}">${s.side === 'buy' ? '▲ 买入' : '▼ 卖出'}</span>` +
-        ` <span>@${s.price.toFixed(2)}</span> <span>强度${s.score}</span>` +
-        `<br><span class="time">${formatTime(s.time)}</span>` +
-        `<br><span class="reasons">${escapeHtml(s.reasons.join('；'))}</span></li>`
-    )
-    .join('');
-  if (recent.length === 0) ul.innerHTML = '<li class="reasons">暂无信号</li>';
+  const html =
+    recent.length === 0
+      ? '<li class="reasons">暂无信号</li>'
+      : recent
+          .map(
+            (s) =>
+              `<li><span class="side-${s.side}">${s.side === 'buy' ? '▲ 买入' : '▼ 卖出'}</span>` +
+              ` <span>@${s.price.toFixed(2)}</span> <span>强度${s.score}</span>` +
+              `<br><span class="time">${formatTime(s.time)}</span>` +
+              `<br><span class="reasons">${escapeHtml(s.reasons.join('；'))}</span></li>`
+          )
+          .join('');
+  setHtmlIfChanged(ul, html);
 }
 
 function renderEventList() {
   const ul = $('eventList');
   const events = listEvents().slice(0, 30);
-  ul.innerHTML = events
+  const html = events
     .map((e) => {
       const cat = EVENT_CATEGORIES[e.category];
       const del = e.id.startsWith('c')
@@ -545,6 +583,7 @@ function renderEventList() {
       );
     })
     .join('');
+  if (!setHtmlIfChanged(ul, html)) return;
   ul.querySelectorAll('.del').forEach((btn) =>
     btn.addEventListener('click', () => {
       removeCustomEvent(btn.dataset.id);
@@ -587,6 +626,7 @@ const symbolSelect = $('symbolSelect');
 symbolSelect.innerHTML = SYMBOLS.map(
   (s) => `<option value="${s.id}">${s.label}</option>`
 ).join('');
+symbolSelect.value = state.symbol;
 
 symbolSelect.addEventListener('change', (e) => {
   state.symbol = e.target.value;
