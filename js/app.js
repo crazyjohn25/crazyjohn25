@@ -67,6 +67,7 @@ const macdDif = macdChart.addLineSeries({ color: '#e6b800', lineWidth: 1, priceL
 const macdDea = macdChart.addLineSeries({ color: '#4d94ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 
 let subSeries = []; // 副图动态系列
+let subSeriesType = null; // 当前副图指标类型，避免每次tick都销毁重建系列
 
 // 三个图表时间轴联动
 function syncTimeScales(charts) {
@@ -190,39 +191,46 @@ function recomputeAndRender({ fitContent }) {
   if (fitContent) mainChart.timeScale().fitContent();
 }
 
+const SUB_INDICATOR_LINES = {
+  rsi: [{ color: '#e6b800', pick: (ind) => ind.rsi }],
+  kdj: [
+    { color: '#e6b800', pick: (ind) => ind.kdj.k },
+    { color: '#4d94ff', pick: (ind) => ind.kdj.d },
+    { color: '#ff7f2a', pick: (ind) => ind.kdj.j },
+  ],
+  dmi: [
+    { color: '#26a69a', pick: (ind) => ind.dmi.pdi },
+    { color: '#ef5350', pick: (ind) => ind.dmi.mdi },
+    { color: '#e6b800', pick: (ind) => ind.dmi.adx },
+  ],
+  obv: [{ color: '#9966ff', pick: (ind) => ind.obv }],
+};
+
 function renderSubIndicator() {
-  for (const s of subSeries) subChart.removeSeries(s);
-  subSeries = [];
   const candles = state.candles;
   const ind = state.indicators;
+  const lines = SUB_INDICATOR_LINES[state.subIndicator];
+  if (!lines || !ind) return;
+
+  // 仅在指标类型切换时重建系列，实时更新只需setData
+  if (subSeriesType !== state.subIndicator) {
+    for (const s of subSeries) subChart.removeSeries(s);
+    subSeries = lines.map((l) =>
+      subChart.addLineSeries({
+        color: l.color,
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      })
+    );
+    subSeriesType = state.subIndicator;
+  }
+
   const toLine = (arr) =>
     candles
       .map((c, i) => (arr[i] !== null ? { time: c.time, value: arr[i] } : null))
       .filter(Boolean);
-  const addLine = (color) => {
-    const s = subChart.addLineSeries({ color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-    subSeries.push(s);
-    return s;
-  };
-
-  switch (state.subIndicator) {
-    case 'rsi':
-      addLine('#e6b800').setData(toLine(ind.rsi));
-      break;
-    case 'kdj':
-      addLine('#e6b800').setData(toLine(ind.kdj.k));
-      addLine('#4d94ff').setData(toLine(ind.kdj.d));
-      addLine('#ff7f2a').setData(toLine(ind.kdj.j));
-      break;
-    case 'dmi':
-      addLine('#26a69a').setData(toLine(ind.dmi.pdi));
-      addLine('#ef5350').setData(toLine(ind.dmi.mdi));
-      addLine('#e6b800').setData(toLine(ind.dmi.adx));
-      break;
-    case 'obv':
-      addLine('#9966ff').setData(toLine(ind.obv));
-      break;
-  }
+  lines.forEach((l, idx) => subSeries[idx].setData(toLine(l.pick(ind))));
 }
 
 // ---------------- 标注：信号 + 宏观事件 ----------------
