@@ -1,14 +1,41 @@
 /**
- * 行情数据源模块
- * 默认使用币安公开REST + WebSocket接口获取真实K线（无需API Key）。
+ * 行情数据源模块（多交易所适配）
+ * - binance: 公开 REST + WebSocket（无需API Key）
+ * - hyperliquid: 官方公开 info API + WebSocket（无需API Key）
  * 网络不可用时自动降级为本地生成的模拟行情，便于离线演示。
  */
 
 const BINANCE_REST = 'https://api.binance.com/api/v3/klines';
 const BINANCE_WS = 'wss://stream.binance.com:9443/ws';
+const HL_REST = 'https://api.hyperliquid.xyz/info';
+const HL_WS = 'wss://api.hyperliquid.xyz/ws';
 
-/** 币安K线数组 -> 标准candle */
-function mapKline(k) {
+/** 支持的品种注册表 */
+export const SYMBOLS = [
+  { id: 'BTCUSDT', label: 'BTC/USDT', source: 'binance', base: 'BTC', whaleUsd: 500000 },
+  { id: 'ETHUSDT', label: 'ETH/USDT', source: 'binance', base: 'ETH', whaleUsd: 300000 },
+  { id: 'SOLUSDT', label: 'SOL/USDT', source: 'binance', base: 'SOL', whaleUsd: 200000 },
+  { id: 'BNBUSDT', label: 'BNB/USDT', source: 'binance', base: 'BNB', whaleUsd: 200000 },
+  { id: 'HYPE', label: 'HYPE/USDC (Hyperliquid)', source: 'hyperliquid', base: 'HYPE', whaleUsd: 100000 },
+];
+
+export function getSymbol(id) {
+  return SYMBOLS.find((s) => s.id === id) || SYMBOLS[0];
+}
+
+export const INTERVAL_SECONDS = {
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '30m': 1800,
+  '1h': 3600,
+  '4h': 14400,
+  '1d': 86400,
+};
+
+// ---------------- Binance ----------------
+
+function mapBinanceKline(k) {
   return {
     time: Math.floor(k[0] / 1000),
     open: parseFloat(k[1]),
@@ -19,21 +46,16 @@ function mapKline(k) {
   };
 }
 
-/** 拉取历史K线 */
-export async function fetchHistory(symbol, interval, limit = 500) {
-  const url = `${BINANCE_REST}?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+async function fetchBinanceHistory(symbolId, interval, limit) {
+  const url = `${BINANCE_REST}?symbol=${encodeURIComponent(symbolId)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`行情接口错误: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Binance接口错误: HTTP ${res.status}`);
   const data = await res.json();
-  return data.map(mapKline);
+  return data.map(mapBinanceKline);
 }
 
-/**
- * 订阅实时K线，返回取消订阅函数
- * @param {Function} onBar 回调 (candle, isClosed)
- */
-export function subscribeKline(symbol, interval, onBar, onError) {
-  const stream = `${symbol.toLowerCase()}@kline_${interval}`;
+function subscribeBinanceKline(symbolId, interval, onBar, onError) {
+  const stream = `${symbolId.toLowerCase()}@kline_${interval}`;
   let ws;
   let closed = false;
 
@@ -59,31 +81,194 @@ export function subscribeKline(symbol, interval, onBar, onError) {
         /* 忽略解析失败的消息 */
       }
     };
-    ws.onerror = (e) => {
-      if (onError) onError(e);
-    };
+    ws.onerror = (e) => onError && onError(e);
     ws.onclose = () => {
-      if (!closed) setTimeout(connect, 3000); // 断线自动重连
+      if (!closed) setTimeout(connect, 3000);
     };
   }
   connect();
-
   return () => {
     closed = true;
     if (ws) ws.close();
   };
 }
 
-// ---------------- 离线模拟行情（网络受限时的降级方案） ----------------
+/** Binance 大额成交监听（aggTrade流） */
+function subscribeBinanceWhales(symbolId, minUsd, onTrade) {
+  const stream = `${symbolId.toLowerCase()}@aggTrade`;
+  let ws;
+  let closed = false;
 
-const INTERVAL_SECONDS = {
-  '1m': 60,
-  '5m': 300,
-  '15m': 900,
-  '1h': 3600,
-  '4h': 14400,
-  '1d': 86400,
-};
+  function connect() {
+    ws = new WebSocket(`${BINANCE_WS}/${stream}`);
+    ws.onmessage = (msg) => {
+      try {
+        const d = JSON.parse(msg.data);
+        const price = parseFloat(d.p);
+        const qty = parseFloat(d.q);
+        const usd = price * qty;
+        if (usd >= minUsd) {
+          onTrade({
+            time: Math.floor(d.T / 1000),
+            price,
+            qty,
+            usd,
+            side: d.m ? 'sell' : 'buy', // m=true 表示买方是maker，即主动卖出
+            source: 'binance',
+          });
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    ws.onclose = () => {
+      if (!closed) setTimeout(connect, 3000);
+    };
+  }
+  connect();
+  return () => {
+    closed = true;
+    if (ws) ws.close();
+  };
+}
+
+// ---------------- Hyperliquid ----------------
+
+function mapHlCandle(c) {
+  return {
+    time: Math.floor(c.t / 1000),
+    open: parseFloat(c.o),
+    high: parseFloat(c.h),
+    low: parseFloat(c.l),
+    close: parseFloat(c.c),
+    volume: parseFloat(c.v),
+  };
+}
+
+async function fetchHlHistory(coin, interval, limit) {
+  const step = (INTERVAL_SECONDS[interval] || 3600) * 1000;
+  const endTime = Date.now();
+  const startTime = endTime - step * limit;
+  const res = await fetch(HL_REST, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'candleSnapshot',
+      req: { coin, interval, startTime, endTime },
+    }),
+  });
+  if (!res.ok) throw new Error(`Hyperliquid接口错误: HTTP ${res.status}`);
+  const data = await res.json();
+  if (!Array.isArray(data)) throw new Error('Hyperliquid返回格式异常');
+  return data.map(mapHlCandle);
+}
+
+function subscribeHlKline(coin, interval, onBar, onError) {
+  let ws;
+  let closed = false;
+
+  function connect() {
+    ws = new WebSocket(HL_WS);
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          method: 'subscribe',
+          subscription: { type: 'candle', coin, interval },
+        })
+      );
+    };
+    ws.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data);
+        if (data.channel !== 'candle' || !data.data) return;
+        const c = data.data;
+        // T 为该K线的收盘时间；当前时间超过T即视为已收盘
+        onBar(mapHlCandle(c), Date.now() > c.T);
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    ws.onerror = (e) => onError && onError(e);
+    ws.onclose = () => {
+      if (!closed) setTimeout(connect, 3000);
+    };
+  }
+  connect();
+  return () => {
+    closed = true;
+    if (ws) ws.close();
+  };
+}
+
+/** Hyperliquid 大额成交监听（trades流） */
+function subscribeHlWhales(coin, minUsd, onTrade) {
+  let ws;
+  let closed = false;
+
+  function connect() {
+    ws = new WebSocket(HL_WS);
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({ method: 'subscribe', subscription: { type: 'trades', coin } })
+      );
+    };
+    ws.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data);
+        if (data.channel !== 'trades' || !Array.isArray(data.data)) return;
+        for (const t of data.data) {
+          const price = parseFloat(t.px);
+          const qty = parseFloat(t.sz);
+          const usd = price * qty;
+          if (usd >= minUsd) {
+            onTrade({
+              time: Math.floor(t.time / 1000),
+              price,
+              qty,
+              usd,
+              side: t.side === 'B' ? 'buy' : 'sell',
+              source: 'hyperliquid',
+            });
+          }
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    ws.onclose = () => {
+      if (!closed) setTimeout(connect, 3000);
+    };
+  }
+  connect();
+  return () => {
+    closed = true;
+    if (ws) ws.close();
+  };
+}
+
+// ---------------- 统一入口（按品种来源分发） ----------------
+
+export async function fetchHistory(symbolId, interval, limit = 500) {
+  const sym = getSymbol(symbolId);
+  if (sym.source === 'hyperliquid') return fetchHlHistory(sym.id, interval, limit);
+  return fetchBinanceHistory(sym.id, interval, limit);
+}
+
+export function subscribeKline(symbolId, interval, onBar, onError) {
+  const sym = getSymbol(symbolId);
+  if (sym.source === 'hyperliquid')
+    return subscribeHlKline(sym.id, interval, onBar, onError);
+  return subscribeBinanceKline(sym.id, interval, onBar, onError);
+}
+
+export function subscribeWhaleTrades(symbolId, onTrade) {
+  const sym = getSymbol(symbolId);
+  if (sym.source === 'hyperliquid')
+    return subscribeHlWhales(sym.id, sym.whaleUsd, onTrade);
+  return subscribeBinanceWhales(sym.id, sym.whaleUsd, onTrade);
+}
+
+// ---------------- 离线模拟行情（网络受限时的降级方案） ----------------
 
 /** 生成带趋势与波动的模拟K线 */
 export function generateMockHistory(interval = '1h', limit = 500, seedPrice = 65000) {

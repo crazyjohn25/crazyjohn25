@@ -1,5 +1,6 @@
 /**
- * 页面主逻辑：图表渲染、实时数据、指标叠加、事件标注、信号报警
+ * 页面主逻辑：图表渲染、实时数据、指标叠加、事件标注、信号报警、
+ * 综合建议、异常交易监控、每小时交易量对比
  */
 import { computeAll } from './indicators.js';
 import { generateSignals, AlertManager } from './signals.js';
@@ -8,30 +9,48 @@ import {
   getAllEvents,
   addCustomEvent,
   removeCustomEvent,
-  fetchLiveEvents,
 } from './events.js';
 import {
+  SYMBOLS,
+  getSymbol,
   fetchHistory,
   subscribeKline,
+  subscribeWhaleTrades,
   generateMockHistory,
   subscribeMockKline,
 } from './datafeed.js';
+import { hourlyVolumeStats, rolling24hVolume, formatVolume } from './volume.js';
+import { detectCandleAnomalies, WhaleFeed } from './anomaly.js';
+import { fetchNews } from './news.js';
+import { runAdvisor, TIMEFRAMES } from './advisor.js';
 
 const $ = (id) => document.getElementById(id);
+
+const SUB_LABELS = {
+  rsi: 'RSI(14) — 相对强弱指标',
+  kdj: 'KDJ(9,3,3) — 随机指标',
+  dmi: 'DMI(14) — 动向指标（+DI/-DI/ADX）',
+  obv: 'OBV — 能量潮（累计成交量）',
+};
 
 const state = {
   symbol: 'BTCUSDT',
   interval: '1h',
   candles: [],
+  candles1h: [], // 独立维护的1小时K线，用于成交量对比
   indicators: null,
   signals: [],
-  liveEvents: [],
+  anomalies: [],
+  newsEvents: [],
+  advice: null,
   unsubscribe: null,
+  unsubWhale: null,
   usingMock: false,
   subIndicator: 'rsi',
 };
 
 const alerts = new AlertManager({ onAlert: showToast });
+const whaleFeed = new WhaleFeed(30);
 
 // ---------------- 图表初始化 ----------------
 
@@ -62,14 +81,22 @@ const bollUpper = mainChart.addLineSeries({ color: 'rgba(77,148,255,.7)', lineWi
 const bollMiddle = mainChart.addLineSeries({ color: 'rgba(230,184,0,.8)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 const bollLower = mainChart.addLineSeries({ color: 'rgba(77,148,255,.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 
+// 主图底部叠加成交量柱
+const volumeSeries = mainChart.addHistogramSeries({
+  priceFormat: { type: 'volume' },
+  priceScaleId: 'vol',
+  priceLineVisible: false,
+  lastValueVisible: false,
+});
+mainChart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
 const macdHist = macdChart.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false });
 const macdDif = macdChart.addLineSeries({ color: '#e6b800', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 const macdDea = macdChart.addLineSeries({ color: '#4d94ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 
-let subSeries = []; // 副图动态系列
-let subSeriesType = null; // 当前副图指标类型，避免每次tick都销毁重建系列
+let subSeries = [];
+let subSeriesType = null;
 
-// 三个图表时间轴联动
 function syncTimeScales(charts) {
   let syncing = false;
   for (const src of charts) {
@@ -87,7 +114,7 @@ syncTimeScales([mainChart, macdChart, subChart]);
 
 // ---------------- 数据加载与实时订阅 ----------------
 
-let loadToken = 0; // 防止快速切换品种时旧请求覆盖新数据
+let loadToken = 0;
 
 async function loadSymbol() {
   const token = ++loadToken;
@@ -95,12 +122,17 @@ async function loadSymbol() {
     state.unsubscribe();
     state.unsubscribe = null;
   }
+  if (state.unsubWhale) {
+    state.unsubWhale();
+    state.unsubWhale = null;
+  }
+  whaleFeed.clear();
   alerts.reset();
   setStatus('加载历史K线…', '');
 
   try {
     const candles = await fetchHistory(state.symbol, state.interval, 500);
-    if (token !== loadToken) return; // 已被更新的加载请求取代
+    if (token !== loadToken) return;
     state.candles = candles;
     state.usingMock = false;
     state.unsubscribe = subscribeKline(
@@ -109,10 +141,10 @@ async function loadSymbol() {
       onRealtimeBar,
       () => setStatus('行情连接异常，自动重连中', 'err')
     );
-    setStatus(`已连接 · ${state.symbol}`, 'ok');
+    state.unsubWhale = subscribeWhaleTrades(state.symbol, onWhaleTrade);
+    setStatus(`已连接 · ${getSymbol(state.symbol).label}`, 'ok');
   } catch (err) {
     if (token !== loadToken) return;
-    // 网络受限时降级为模拟行情
     state.candles = generateMockHistory(state.interval, 500);
     state.usingMock = true;
     setStatus('离线模式（模拟行情演示）', 'err');
@@ -124,6 +156,8 @@ async function loadSymbol() {
   }
 
   recomputeAndRender({ fitContent: true });
+  refreshAdvisorAndVolume();
+  refreshNews();
 }
 
 function onRealtimeBar(bar) {
@@ -134,9 +168,14 @@ function onRealtimeBar(bar) {
     state.candles.push(bar);
     if (state.candles.length > 1500) state.candles.shift();
   } else {
-    return; // 乱序数据丢弃
+    return;
   }
   recomputeAndRender({ fitContent: false });
+}
+
+function onWhaleTrade(trade) {
+  whaleFeed.push(trade);
+  renderWhaleList();
 }
 
 // ---------------- 计算 + 渲染 ----------------
@@ -147,8 +186,16 @@ function recomputeAndRender({ fitContent }) {
 
   state.indicators = computeAll(candles);
   state.signals = generateSignals(candles, state.indicators);
+  state.anomalies = detectCandleAnomalies(candles);
 
   candleSeries.setData(candles);
+  volumeSeries.setData(
+    candles.map((c) => ({
+      time: c.time,
+      value: c.volume,
+      color: c.close >= c.open ? 'rgba(38,166,154,.4)' : 'rgba(239,83,80,.4)',
+    }))
+  );
 
   const toLine = (arr) =>
     candles
@@ -179,9 +226,9 @@ function recomputeAndRender({ fitContent }) {
   renderSubIndicator();
   renderMarkers();
   renderSignalList();
+  renderAnomalyList();
   renderEventList();
 
-  // 只对已收盘K线上的信号报警，避免盘中反复触发
   const lastTime = candles[candles.length - 1].time;
   alerts.check(
     state.signals.filter((s) => s.time < lastTime),
@@ -212,7 +259,6 @@ function renderSubIndicator() {
   const lines = SUB_INDICATOR_LINES[state.subIndicator];
   if (!lines || !ind) return;
 
-  // 仅在指标类型切换时重建系列，实时更新只需setData
   if (subSeriesType !== state.subIndicator) {
     for (const s of subSeries) subChart.removeSeries(s);
     subSeries = lines.map((l) =>
@@ -224,6 +270,7 @@ function renderSubIndicator() {
       })
     );
     subSeriesType = state.subIndicator;
+    $('subLabel').textContent = SUB_LABELS[state.subIndicator];
   }
 
   const toLine = (arr) =>
@@ -233,13 +280,140 @@ function renderSubIndicator() {
   lines.forEach((l, idx) => subSeries[idx].setData(toLine(l.pick(ind))));
 }
 
+// ---------------- 综合建议 + 成交量对比（每30分钟刷新） ----------------
+
+async function refreshAdvisorAndVolume() {
+  const box = $('advisorBox');
+  box.innerHTML = '<div class="advisor-loading">分析中…</div>';
+
+  const fetchCandles = async (tf) => {
+    if (state.usingMock) return generateMockHistory(tf, 400);
+    const c = await fetchHistory(state.symbol, tf, 400);
+    if (tf === '1h') state.candles1h = c;
+    return c;
+  };
+
+  try {
+    state.advice = await runAdvisor(fetchCandles);
+  } catch (_) {
+    state.advice = null;
+  }
+  if (state.usingMock) state.candles1h = generateMockHistory('1h', 400);
+
+  renderAdvisor();
+  renderVolumePanel();
+}
+
+function verdictClass(score) {
+  if (score >= 1) return 'bull';
+  if (score <= -1) return 'bear';
+  return 'flat';
+}
+
+function actionClass(action) {
+  if (action.includes('买') || action.includes('多')) return 'buy';
+  if (action.includes('卖') || action.includes('减')) return 'sell';
+  return 'hold';
+}
+
+function renderAdvisor() {
+  const box = $('advisorBox');
+  const adv = state.advice;
+  if (!adv) {
+    box.innerHTML = '<div class="advisor-loading">分析失败，请点击下方按钮重试</div>';
+    return;
+  }
+  const tfRows = TIMEFRAMES.map((tf) => {
+    const r = adv.perTf[tf];
+    if (!r) return '';
+    const cls = verdictClass(r.score);
+    const reasons = r.reasons.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
+    return (
+      `<details class="tf-row"><summary class="tf-head">` +
+      `<span class="tf-name">${tf}</span>` +
+      `<span class="tf-verdict ${cls}">${escapeHtml(r.verdict)}（${r.score.toFixed(1)}分）</span>` +
+      `</summary><ul class="tf-reasons">${reasons}</ul></details>`
+    );
+  }).join('');
+
+  box.innerHTML =
+    `<span class="action ${actionClass(adv.action)}">${escapeHtml(adv.action)}</span>` +
+    `<span class="upd"> 更新于 ${formatTime(adv.updatedAt)}${state.usingMock ? '（模拟数据）' : ''}</span>` +
+    `<div class="summary">${escapeHtml(adv.summary)}</div>` +
+    tfRows;
+}
+
+function renderVolumePanel() {
+  const candles1h = state.candles1h;
+  const summaryEl = $('volumeSummary');
+  const tbody = $('volumeTable').querySelector('tbody');
+  if (!candles1h || candles1h.length < 48) {
+    summaryEl.textContent = '1小时K线数据不足';
+    tbody.innerHTML = '';
+    return;
+  }
+
+  const r24 = rolling24hVolume(candles1h);
+  if (r24) {
+    const cls = r24.changePct >= 0 ? 'up' : 'down';
+    summaryEl.innerHTML =
+      `近24小时总量 <b>${formatVolume(r24.last24)}</b>，前24小时 ${formatVolume(r24.prev24)}，` +
+      `变化 <span class="${cls}">${r24.changePct >= 0 ? '+' : ''}${r24.changePct.toFixed(1)}%</span>`;
+  }
+
+  const rows = hourlyVolumeStats(candles1h, 12);
+  const maxVol = Math.max(...rows.map((r) => r.volume));
+  tbody.innerHTML = rows
+    .map((r) => {
+      const d = new Date(r.time * 1000);
+      const hh = String(d.getUTCHours()).padStart(2, '0');
+      const pctCell = (v) =>
+        v === null
+          ? '<td>-</td>'
+          : `<td class="${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '+' : ''}${v.toFixed(0)}%</td>`;
+      const hot = r.volume === maxVol ? ' class="hot"' : '';
+      return (
+        `<tr${hot}><td>${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')} ${hh}:00</td>` +
+        `<td>${formatVolume(r.volume)}</td>${pctCell(r.vsPrevPct)}${pctCell(r.vsSameHourAvgPct)}</tr>`
+      );
+    })
+    .join('');
+}
+
+// ---------------- 异常交易监控 ----------------
+
+function renderAnomalyList() {
+  const ul = $('anomalyList');
+  const recent = state.anomalies.slice(0, 8);
+  ul.innerHTML = recent
+    .map(
+      (a) =>
+        `<li><span class="anomaly-tag">${a.type === 'both' ? '量价异动' : a.type === 'volume' ? '放量' : '价格异动'}</span>` +
+        `${escapeHtml(a.desc)}<br><span class="time">${formatTime(a.time)}</span></li>`
+    )
+    .join('');
+  if (recent.length === 0) ul.innerHTML = '<li class="reasons">当前周期暂无量价异动</li>';
+}
+
+function renderWhaleList() {
+  const ul = $('whaleList');
+  const recent = whaleFeed.trades.slice(0, 8);
+  ul.innerHTML = recent
+    .map(
+      (t) =>
+        `<li><span class="whale-${t.side}">${t.side === 'buy' ? '⬆ 大额买入' : '⬇ 大额卖出'}</span>` +
+        ` $${formatVolume(t.usd)} @ ${t.price.toFixed(2)}` +
+        `<br><span class="time">${formatTime(t.time)} · ${t.source}</span></li>`
+    )
+    .join('');
+}
+
 // ---------------- 标注：信号 + 宏观事件 ----------------
 
 function nearestCandleTime(t) {
   const candles = state.candles;
   if (candles.length === 0) return null;
   if (t < candles[0].time || t > candles[candles.length - 1].time) return null;
-  // 二分找到 <= t 的最后一根K线
   let lo = 0;
   let hi = candles.length - 1;
   while (lo < hi) {
@@ -250,7 +424,16 @@ function nearestCandleTime(t) {
   return candles[lo].time;
 }
 
-const eventMarkerMap = new Map(); // time -> events[]（供tooltip查询）
+const eventMarkerMap = new Map();
+
+/** 全部事件源合并：内置+自定义+真实新闻（高影响新闻才上图） */
+function chartEvents() {
+  return getAllEvents(state.newsEvents.filter((e) => e.impact === 'high'));
+}
+
+function listEvents() {
+  return [...getAllEvents([]), ...state.newsEvents].sort((a, b) => b.time - a.time);
+}
 
 function renderMarkers() {
   const markers = [];
@@ -269,7 +452,7 @@ function renderMarkers() {
   }
 
   if ($('toggleEvents').checked) {
-    for (const evt of getAllEvents(state.liveEvents)) {
+    for (const evt of chartEvents()) {
       const t = nearestCandleTime(evt.time);
       if (t === null) continue;
       if (!eventMarkerMap.has(t)) eventMarkerMap.set(t, []);
@@ -288,7 +471,6 @@ function renderMarkers() {
   candleSeries.setMarkers(markers);
 }
 
-// 十字光标悬停时显示事件详情
 const tooltip = $('tooltip');
 mainChart.subscribeCrosshairMove((param) => {
   if (!param.time || !eventMarkerMap.has(param.time)) {
@@ -344,17 +526,21 @@ function renderSignalList() {
 
 function renderEventList() {
   const ul = $('eventList');
-  const events = getAllEvents(state.liveEvents).slice().reverse();
+  const events = listEvents().slice(0, 30);
   ul.innerHTML = events
     .map((e) => {
       const cat = EVENT_CATEGORIES[e.category];
       const del = e.id.startsWith('c')
         ? `<button class="del" data-id="${e.id}" title="删除">✕</button>`
         : '';
+      const src = e.source ? `<span class="src-tag">${escapeHtml(e.source)}</span>` : '';
+      const title = e.url
+        ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.title)}</a>`
+        : escapeHtml(e.title);
       return (
-        `<li>${del}<span class="cat" style="background:${cat.color}">${cat.label}</span>` +
-        `${escapeHtml(e.title)}<br><span class="time">${formatTime(e.time)}</span>` +
-        (e.note ? `<br><span class="note">${escapeHtml(e.note)}</span>` : '') +
+        `<li>${del}<span class="cat" style="background:${cat.color}">${cat.label}</span>${src}` +
+        `${title}<br><span class="time">${formatTime(e.time)}</span>` +
+        (e.note && !e.source ? `<br><span class="note">${escapeHtml(e.note)}</span>` : '') +
         `</li>`
       );
     })
@@ -382,9 +568,27 @@ function setStatus(text, cls) {
   el.className = `status ${cls}`;
 }
 
+// ---------------- 真实新闻抓取 ----------------
+
+async function refreshNews() {
+  const base = getSymbol(state.symbol).base;
+  try {
+    state.newsEvents = await fetchNews(base);
+  } catch (_) {
+    state.newsEvents = [];
+  }
+  renderMarkers();
+  renderEventList();
+}
+
 // ---------------- 交互绑定 ----------------
 
-$('symbolSelect').addEventListener('change', (e) => {
+const symbolSelect = $('symbolSelect');
+symbolSelect.innerHTML = SYMBOLS.map(
+  (s) => `<option value="${s.id}">${s.label}</option>`
+).join('');
+
+symbolSelect.addEventListener('change', (e) => {
   state.symbol = e.target.value;
   loadSymbol();
 });
@@ -404,6 +608,8 @@ $('toggleSignals').addEventListener('change', renderMarkers);
 $('toggleMute').addEventListener('change', (e) => {
   alerts.muted = e.target.checked;
 });
+
+$('advisorRefresh').addEventListener('click', refreshAdvisorAndVolume);
 
 $('eventForm').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -425,16 +631,9 @@ $('eventForm').addEventListener('submit', (e) => {
 // ---------------- 启动 ----------------
 
 alerts.requestPermission();
-
-// 可选：配置实时事件接口后自动拉取（每5分钟刷新一次）
-const LIVE_EVENTS_API = ''; // 例如 'https://your-server/api/macro-events'
-async function refreshLiveEvents() {
-  if (!LIVE_EVENTS_API) return;
-  state.liveEvents = await fetchLiveEvents(LIVE_EVENTS_API);
-  renderMarkers();
-  renderEventList();
-}
-refreshLiveEvents();
-setInterval(refreshLiveEvents, 5 * 60 * 1000);
-
 loadSymbol();
+
+// 综合建议 + 成交量对比：每30分钟刷新
+setInterval(refreshAdvisorAndVolume, 30 * 60 * 1000);
+// 新闻：每5分钟刷新
+setInterval(refreshNews, 5 * 60 * 1000);

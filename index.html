@@ -14,16 +14,12 @@
     <div class="brand">K线智能分析终端</div>
     <div class="controls">
       <label>品种
-        <select id="symbolSelect">
-          <option value="BTCUSDT">BTC/USDT</option>
-          <option value="ETHUSDT">ETH/USDT</option>
-          <option value="SOLUSDT">SOL/USDT</option>
-          <option value="BNBUSDT">BNB/USDT</option>
-        </select>
+        <select id="symbolSelect"></select>
       </label>
       <label>周期
         <select id="intervalSelect">
           <option value="15m">15分钟</option>
+          <option value="30m">30分钟</option>
           <option value="1h" selected>1小时</option>
           <option value="4h">4小时</option>
           <option value="1d">日线</option>
@@ -52,19 +48,50 @@
 
   <main class="layout">
     <section class="charts">
-      <div id="mainChart" class="chart main"></div>
-      <div id="macdChart" class="chart sub"></div>
-      <div id="subChart" class="chart sub"></div>
+      <div id="mainChart" class="chart main">
+        <div class="pane-label" id="mainLabel">K线 · BOLL(20,2) · 成交量</div>
+      </div>
+      <div id="macdChart" class="chart sub">
+        <div class="pane-label">MACD(12,26,9) — 指数平滑异同移动平均线</div>
+      </div>
+      <div id="subChart" class="chart sub">
+        <div class="pane-label" id="subLabel">RSI(14) — 相对强弱指标</div>
+      </div>
     </section>
 
     <aside class="sidebar">
+      <div class="panel" id="advisorPanel">
+        <h3>综合建议 <span class="h-note">15m/30m/1h/4h · 每30分钟更新</span></h3>
+        <div id="advisorBox" class="advisor-box">
+          <div class="advisor-loading">分析中…</div>
+        </div>
+        <button id="advisorRefresh" class="btn-small">立即重新分析</button>
+      </div>
+
       <div class="panel">
         <h3>最新信号</h3>
         <ul id="signalList" class="signal-list"></ul>
       </div>
 
       <div class="panel">
-        <h3>宏观事件</h3>
+        <h3>异常交易监控 <span class="h-note">量价异动 + 大额成交</span></h3>
+        <ul id="anomalyList" class="event-list"></ul>
+        <ul id="whaleList" class="event-list"></ul>
+      </div>
+
+      <div class="panel">
+        <h3>每小时交易量对比 <span class="h-note">UTC · 基于1小时K线</span></h3>
+        <div id="volumeSummary" class="vol-summary"></div>
+        <table class="vol-table" id="volumeTable">
+          <thead>
+            <tr><th>时段</th><th>量</th><th>环比</th><th>vs 7日同时段</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h3>宏观新闻/事件 <span class="h-note">The Block · CoinDesk · 吴说 · AP</span></h3>
         <ul id="eventList" class="event-list"></ul>
         <details class="add-event">
           <summary>+ 添加自定义事件</summary>

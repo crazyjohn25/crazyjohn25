@@ -85,6 +85,19 @@ body {
 .chart.main { flex: 3; }
 .chart.sub { flex: 1; }
 
+.pane-label {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  z-index: 10;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(16, 20, 28, .7);
+  padding: 2px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -102,6 +115,94 @@ body {
 .panel h3 {
   margin: 0 0 8px;
   font-size: 14px;
+  color: var(--accent);
+}
+
+.h-note {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* 综合建议面板 */
+.advisor-box .action {
+  display: inline-block;
+  font-size: 15px;
+  font-weight: 700;
+  padding: 3px 12px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+.advisor-box .action.buy { background: rgba(38,166,154,.2); color: var(--buy); }
+.advisor-box .action.sell { background: rgba(239,83,80,.2); color: var(--sell); }
+.advisor-box .action.hold { background: rgba(124,135,155,.2); color: var(--muted); }
+.advisor-box .summary { font-size: 12px; line-height: 1.5; margin: 4px 0 8px; }
+.advisor-box .tf-row {
+  border-top: 1px solid var(--border);
+  padding: 6px 0;
+  font-size: 12px;
+}
+.advisor-box .tf-head { display: flex; justify-content: space-between; cursor: pointer; }
+.advisor-box .tf-name { color: var(--accent); font-weight: 600; }
+.advisor-box .tf-verdict.bull { color: var(--buy); }
+.advisor-box .tf-verdict.bear { color: var(--sell); }
+.advisor-box .tf-verdict.flat { color: var(--muted); }
+.advisor-box .tf-reasons { color: var(--muted); margin: 4px 0 0 4px; padding-left: 12px; }
+.advisor-box .tf-reasons li { padding: 1px 0; border: none; }
+.advisor-box .upd { color: var(--muted); font-size: 11px; }
+.advisor-loading { color: var(--muted); padding: 8px 0; }
+
+.btn-small {
+  margin-top: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btn-small:hover { border-color: var(--accent); }
+
+/* 成交量对比表 */
+.vol-summary { font-size: 12px; color: var(--muted); margin-bottom: 6px; line-height: 1.5; }
+.vol-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.vol-table th, .vol-table td {
+  text-align: right;
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.vol-table th:first-child, .vol-table td:first-child { text-align: left; }
+.vol-table th { color: var(--muted); font-weight: 400; }
+.vol-table .up { color: var(--buy); }
+.vol-table .down { color: var(--sell); }
+.vol-table .hot td { background: rgba(230,184,0,.07); }
+
+/* 异常/鲸鱼列表 */
+.event-list .whale-buy { color: var(--buy); }
+.event-list .whale-sell { color: var(--sell); }
+.event-list .anomaly-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  margin-right: 5px;
+  background: rgba(255,127,42,.2);
+  color: #ff7f2a;
+}
+.event-list a { color: var(--text); text-decoration: none; }
+.event-list a:hover { color: var(--accent); text-decoration: underline; }
+.event-list .src-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  margin-right: 5px;
+  background: rgba(77,148,255,.15);
   color: var(--accent);
 }
 
