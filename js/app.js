@@ -22,7 +22,17 @@ import {
 import { hourlyVolumeStats, rolling24hVolume, formatVolume } from './volume.js';
 import { detectCandleAnomalies, WhaleFeed } from './anomaly.js';
 import { fetchNews } from './news.js';
-import { runAdvisor, TIMEFRAMES } from './advisor.js';
+import { runAdvisor, TIMEFRAMES, TF_WEIGHTS } from './advisor.js';
+import {
+  currentWindowStart,
+  fetchWindowMarket,
+  fetchBook,
+  fetchTrades,
+  analyzeBook,
+  analyzeTrades,
+  advise5m,
+} from './polymarket.js';
+import { ReviewLog, adaptWeights } from './review.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -51,6 +61,19 @@ const state = {
 
 const alerts = new AlertManager({ onAlert: showToast });
 const whaleFeed = new WhaleFeed(30);
+const reviewLog = new ReviewLog();
+
+/** Polymarket 5m 状态（仅BTC品种启用） */
+const pm = {
+  window: null, // fetchWindowMarket 结果
+  strike: null, // 窗口开始价（以币安1m开盘价近似Chainlink）
+  advice: null,
+  flow: null,
+  bookInfo: null,
+  candles1m: [], // 独立的BTC 1分钟K线缓存
+  priceLine: null,
+  lastRecordWindow: null,
+};
 
 // ---------------- 图表初始化 ----------------
 
@@ -156,8 +179,11 @@ async function loadSymbol() {
   }
 
   recomputeAndRender({ fitContent: true });
+  removeStrikeLine();
+  await refreshPm1mCandles();
   refreshAdvisorAndVolume();
   refreshNews();
+  refreshPolymarket();
 }
 
 let lastFullRender = 0;
@@ -324,15 +350,116 @@ async function refreshAdvisorAndVolume() {
     return c;
   };
 
+  // 复盘：先结算到期预测，再用自适应权重出新建议
+  settleReviews();
+  const { weights, reflections } = adaptWeights(reviewLog.stats(), TF_WEIGHTS);
+  state.reflections = reflections;
+
   try {
-    state.advice = await runAdvisor(fetchCandles);
+    state.advice = await runAdvisor(fetchCandles, { weights });
   } catch (_) {
     state.advice = null;
   }
   if (state.usingMock) state.candles1h = generateMockHistory('1h', 400);
 
+  recordAdvisorPredictions();
   renderAdvisor();
   renderVolumePanel();
+  renderReviewPanel();
+}
+
+// ---------------- 建议复盘：登记、结算、反思 ----------------
+
+const TF_HORIZON = { '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400 };
+
+/** 登记本轮综合建议的各周期预测（到期后与实际对照） */
+function recordAdvisorPredictions() {
+  const adv = state.advice;
+  if (!adv || state.usingMock) return;
+  const now = Math.floor(Date.now() / 1000);
+  const price = state.candles.length ? state.candles[state.candles.length - 1].close : null;
+  if (!price) return;
+  for (const tf of TIMEFRAMES) {
+    const r = adv.perTf[tf];
+    if (!r || r.verdict === '数据不足') continue;
+    const direction = r.score >= 0.75 ? 'up' : r.score <= -0.75 ? 'down' : 'flat';
+    if (direction === 'flat') continue; // 只复盘有方向的判断
+    reviewLog.record({
+      source: `advisor:${tf}`,
+      symbol: state.symbol,
+      direction,
+      priceAtCall: price,
+      callTime: now,
+      evalTime: now + TF_HORIZON[tf],
+      note: r.verdict,
+    });
+  }
+}
+
+/** 用K线还原任意时刻的价格（供结算） */
+function priceAt(symbol, timeSec) {
+  const pools = [];
+  if (symbol === state.symbol && state.candles.length) pools.push(state.candles);
+  if (symbol === 'BTCUSDT' && pm.candles1m.length) pools.push(pm.candles1m);
+  if (symbol === state.symbol && state.candles1h.length) pools.push(state.candles1h);
+  for (const candles of pools) {
+    if (candles[candles.length - 1].time < timeSec) continue; // 数据未覆盖评估点
+    for (let i = candles.length - 1; i >= 0; i--) {
+      if (candles[i].time <= timeSec) return candles[i].close;
+    }
+  }
+  return null;
+}
+
+function settleReviews() {
+  if (state.usingMock) return;
+  reviewLog.settle(priceAt);
+}
+
+function renderReviewPanel() {
+  const box = $('reviewBox');
+  const stats = reviewLog.stats();
+  const entries = Object.entries(stats);
+  const recent = reviewLog.recent(6);
+  const pending = reviewLog.pendingCount();
+
+  if (entries.length === 0 && recent.length === 0) {
+    setHtmlIfChanged(
+      box,
+      `<div class="advisor-loading">暂无已结算的预测${pending ? `（${pending}条待结算）` : ''}</div>`
+    );
+    return;
+  }
+
+  const SRC_LABEL = (s) =>
+    s.startsWith('advisor:') ? `综合建议 ${s.split(':')[1]}` : s === 'polymarket:5m' ? 'PM 5分钟' : s;
+
+  const statHtml = entries
+    .map(([src, s]) => {
+      const pct = s.hitRate !== null ? (s.hitRate * 100).toFixed(0) : '-';
+      const cls = s.hitRate >= 0.55 ? 'good' : s.hitRate < 0.45 ? 'bad' : '';
+      return `<div class="rv-stat"><span>${SRC_LABEL(src)}</span><span class="rv-rate ${cls}">${s.hits}/${s.total} 命中 ${pct}%</span></div>`;
+    })
+    .join('');
+
+  const reflectHtml =
+    state.reflections && state.reflections.length
+      ? `<div class="rv-reflect">反思：${state.reflections.map(escapeHtml).join('；')}</div>`
+      : '';
+
+  const recentHtml = recent
+    .map(
+      (r) =>
+        `<div class="rv-item"><span class="rv-${r.outcome}">${r.outcome === 'hit' ? '✓' : '✗'}</span> ` +
+        `${SRC_LABEL(r.source)} 预测${r.direction === 'up' ? '涨' : '跌'} → 实际${r.changePct >= 0 ? '+' : ''}${r.changePct.toFixed(2)}%` +
+        `<br><span class="time">${formatTime(r.callTime)} 判定于 ${formatTime(r.evalTime)}</span></div>`
+    )
+    .join('');
+
+  setHtmlIfChanged(
+    box,
+    statHtml + reflectHtml + recentHtml + (pending ? `<div class="rv-item">另有 ${pending} 条预测待结算</div>` : '')
+  );
 }
 
 function verdictClass(score) {
@@ -367,10 +494,18 @@ function renderAdvisor() {
     );
   }).join('');
 
+  const planHtml = adv.plan
+    ? `<div class="plan"><b>交易计划（${adv.plan.direction === 'long' ? '做多' : '做空'}）</b><br>` +
+      `入场 ${adv.plan.entry.toFixed(1)} · 止损 ${adv.plan.stop.toFixed(1)} · 目标 ${adv.plan.target.toFixed(1)}` +
+      (adv.plan.rr ? ` · 盈亏比 1:${adv.plan.rr.toFixed(1)}` : '') +
+      `<br>${escapeHtml(adv.plan.note)}</div>`
+    : '';
+
   box.innerHTML =
     `<span class="action ${actionClass(adv.action)}">${escapeHtml(adv.action)}</span>` +
     `<span class="upd"> 更新于 ${formatTime(adv.updatedAt)}${state.usingMock ? '（模拟数据）' : ''}</span>` +
     `<div class="summary">${escapeHtml(adv.summary)}</div>` +
+    planHtml +
     tfRows;
 }
 
@@ -607,6 +742,166 @@ function setStatus(text, cls) {
   el.className = `status ${cls}`;
 }
 
+// ---------------- Polymarket BTC 5分钟玩法 ----------------
+
+function pmActive() {
+  return state.symbol === 'BTCUSDT' && !state.usingMock;
+}
+
+/** 维护独立的BTC 1分钟K线缓存（每60秒刷新） */
+async function refreshPm1mCandles() {
+  if (!pmActive()) return;
+  try {
+    pm.candles1m = await fetchHistory('BTCUSDT', '1m', 180);
+  } catch (_) {
+    /* 保留旧缓存 */
+  }
+}
+
+/** 主循环：每15秒刷新市场、订单簿、成交流并更新建议 */
+async function refreshPolymarket() {
+  const panel = $('pmPanel');
+  if (!pmActive()) {
+    panel.style.display = 'none';
+    removeStrikeLine();
+    return;
+  }
+  panel.style.display = '';
+
+  const winStart = currentWindowStart();
+  try {
+    // 窗口切换或首次：拉市场信息
+    if (!pm.window || pm.window.startSec !== winStart) {
+      pm.window = await fetchWindowMarket(winStart);
+      pm.strike = null;
+    }
+    if (!pm.window) {
+      setHtmlIfChanged($('pmBox'), '<div class="advisor-loading">本窗口市场尚未创建，等待下一期…</div>');
+      return;
+    }
+
+    // 目标价：窗口起始1分钟K线的开盘价（近似Chainlink起始价）
+    if (!pm.strike) {
+      const startBar = pm.candles1m.find((c) => c.time === winStart);
+      if (startBar) pm.strike = startBar.open;
+    }
+
+    // 订单簿 + 成交流
+    const [book, trades] = await Promise.all([
+      pm.window.upTokenId ? fetchBook(pm.window.upTokenId) : null,
+      pm.window.conditionId ? fetchTrades(pm.window.conditionId, 100) : [],
+    ]);
+    pm.bookInfo = book ? analyzeBook(book) : null;
+    // 只统计本窗口内的成交
+    pm.flow = analyzeTrades(trades.filter((t) => Number(t.timestamp) >= winStart));
+
+    const secondsLeft = Math.max(0, pm.window.endSec - Math.floor(Date.now() / 1000));
+    pm.advice = advise5m({
+      candles1m: pm.candles1m,
+      strikePrice: pm.strike,
+      upPrice: pm.window.upPrice,
+      flow: pm.flow,
+      book: pm.bookInfo,
+      secondsLeft,
+    });
+
+    // 复盘登记：每窗口只记一次有方向的建议
+    if (
+      (pm.advice.action === '买Up' || pm.advice.action === '买Down') &&
+      pm.lastRecordWindow !== winStart &&
+      pm.candles1m.length
+    ) {
+      pm.lastRecordWindow = winStart;
+      reviewLog.record({
+        source: 'polymarket:5m',
+        symbol: 'BTCUSDT',
+        direction: pm.advice.action === '买Up' ? 'up' : 'down',
+        priceAtCall: pm.strike ?? pm.candles1m[pm.candles1m.length - 1].close,
+        callTime: Math.floor(Date.now() / 1000),
+        evalTime: pm.window.endSec,
+        note: `edge=${(pm.advice.edge * 100).toFixed(1)}分`,
+      });
+    }
+
+    renderPmPanel(secondsLeft);
+    updateStrikeLine();
+  } catch (_) {
+    setHtmlIfChanged($('pmBox'), '<div class="advisor-loading">Polymarket数据获取失败，将自动重试</div>');
+  }
+}
+
+function renderPmPanel(secondsLeft) {
+  const w = pm.window;
+  const a = pm.advice;
+  const actionCls = a.action === '买Up' ? 'up' : a.action === '买Down' ? 'down' : 'hold';
+
+  const bigHtml =
+    pm.flow && pm.flow.bigTrades.length
+      ? `<div class="pm-big"><b>大额订单（本窗口）</b>` +
+        pm.flow.bigTrades
+          .slice(0, 4)
+          .map(
+            (t) =>
+              `<li>${t.direction === 'up' ? '🟢押涨' : '🔴押跌'} $${t.usd.toFixed(0)} @${(t.price * 100).toFixed(0)}¢ · ${escapeHtml(t.trader)}</li>`
+          )
+          .join('') +
+        `</div>`
+      : '';
+
+  const anomalyHtml =
+    pm.flow && pm.flow.anomalies.length
+      ? `<div class="pm-big"><b>异常订单</b>` +
+        pm.flow.anomalies.map((x) => `<li>⚠ ${escapeHtml(x.desc)}</li>`).join('') +
+        `</div>`
+      : '';
+
+  setHtmlIfChanged(
+    $('pmBox'),
+    `<div class="pm-q">${escapeHtml(w.question)} · <a href="${escapeHtml(w.url)}" target="_blank" rel="noopener noreferrer">开市场↗</a></div>` +
+      `<div class="pm-odds">` +
+      `<div class="pm-odd up">${w.upPrice !== null ? (w.upPrice * 100).toFixed(0) + '¢' : '-'}<small>Up 隐含概率</small></div>` +
+      `<div class="pm-odd down">${w.downPrice !== null ? (w.downPrice * 100).toFixed(0) + '¢' : '-'}<small>Down 隐含概率</small></div>` +
+      `</div>` +
+      (pm.strike
+        ? `<div class="pm-strike">🎯 目标价 ${pm.strike.toFixed(1)}（已画到K线图，币安1m开盘价近似Chainlink）</div>`
+        : `<div class="pm-strike">目标价待窗口起始K线生成…</div>`) +
+      `<span class="pm-action ${actionCls}">${escapeHtml(a.action)}</span>` +
+      (a.edge ? `<span class="upd"> 期望优势 ${(a.edge * 100).toFixed(1)}分</span>` : '') +
+      `<ul>${a.reasons.map((r) => `<li>· ${escapeHtml(r)}</li>`).join('')}</ul>` +
+      bigHtml +
+      anomalyHtml
+  );
+  $('pmCountdown').textContent = `剩余 ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`;
+}
+
+function updateStrikeLine() {
+  removeStrikeLine();
+  if (pm.strike && pmActive() && ['1m', '5m', '15m'].includes(state.interval)) {
+    pm.priceLine = candleSeries.createPriceLine({
+      price: pm.strike,
+      color: '#e6b800',
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'PM 5m目标价',
+    });
+  }
+}
+
+function removeStrikeLine() {
+  if (pm.priceLine) {
+    candleSeries.removePriceLine(pm.priceLine);
+    pm.priceLine = null;
+  }
+}
+
+// 倒计时每秒走字（不发请求）
+setInterval(() => {
+  if (!pm.window || !pmActive()) return;
+  const secondsLeft = Math.max(0, pm.window.endSec - Math.floor(Date.now() / 1000));
+  $('pmCountdown').textContent = `剩余 ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`;
+}, 1000);
+
 // ---------------- 真实新闻抓取 ----------------
 
 async function refreshNews() {
@@ -677,3 +972,11 @@ loadSymbol();
 setInterval(refreshAdvisorAndVolume, 30 * 60 * 1000);
 // 新闻：每5分钟刷新
 setInterval(refreshNews, 5 * 60 * 1000);
+// Polymarket 5m：每15秒刷新行情与建议；1分钟K线缓存每60秒刷新
+setInterval(refreshPolymarket, 15 * 1000);
+setInterval(refreshPm1mCandles, 60 * 1000);
+// 复盘结算：每分钟检查一次到期预测
+setInterval(() => {
+  settleReviews();
+  renderReviewPanel();
+}, 60 * 1000);

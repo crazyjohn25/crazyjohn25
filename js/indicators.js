@@ -226,8 +226,87 @@ export function obv(candles) {
   return out;
 }
 
+/**
+ * ATR 平均真实波幅（Wilder 平滑）
+ */
+export function atr(candles, period = 14) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if (n <= period) return out;
+  const trs = [];
+  for (let i = 1; i < n; i++) {
+    const c = candles[i];
+    const p = candles[i - 1];
+    trs.push(
+      Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close))
+    );
+  }
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += trs[i];
+  let prev = sum / period;
+  out[period] = prev;
+  for (let i = period + 1; i < n; i++) {
+    prev = (prev * (period - 1) + trs[i - 1]) / period;
+    out[i] = prev;
+  }
+  return out;
+}
+
+/**
+ * VWAP 成交量加权均价（按UTC日锚定，机构常用的日内基准）
+ */
+export function vwapSeries(candles) {
+  const out = new Array(candles.length).fill(null);
+  let cumPV = 0;
+  let cumV = 0;
+  let curDay = null;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const day = Math.floor(c.time / 86400);
+    if (day !== curDay) {
+      curDay = day;
+      cumPV = 0;
+      cumV = 0;
+    }
+    const typical = (c.high + c.low + c.close) / 3;
+    cumPV += typical * c.volume;
+    cumV += c.volume;
+    out[i] = cumV > 0 ? cumPV / cumV : null;
+  }
+  return out;
+}
+
+/**
+ * 摆动高低点支撑/阻力：用 wings 根K线确认的枢轴点，
+ * 返回距当前价最近的下方支撑与上方阻力。
+ */
+export function swingLevels(candles, { lookback = 80, wings = 2 } = {}) {
+  const n = candles.length;
+  if (n < wings * 2 + 2) return { support: null, resistance: null };
+  const last = candles[n - 1].close;
+  const start = Math.max(wings, n - lookback);
+  let support = null;
+  let resistance = null;
+  for (let i = start; i < n - wings; i++) {
+    let isHigh = true;
+    let isLow = true;
+    for (let w = 1; w <= wings; w++) {
+      if (candles[i].high < candles[i - w].high || candles[i].high < candles[i + w].high)
+        isHigh = false;
+      if (candles[i].low > candles[i - w].low || candles[i].low > candles[i + w].low)
+        isLow = false;
+    }
+    if (isHigh && candles[i].high > last && (resistance === null || candles[i].high < resistance))
+      resistance = candles[i].high;
+    if (isLow && candles[i].low < last && (support === null || candles[i].low > support))
+      support = candles[i].low;
+  }
+  return { support, resistance };
+}
+
 /** 一次性计算全部指标，供图表与信号引擎复用 */
 export function computeAll(candles, params = {}) {
+  const closes = candles.map((c) => c.close);
   return {
     macd: macd(candles, params.macdFast, params.macdSlow, params.macdSignal),
     boll: bollinger(candles, params.bollPeriod, params.bollMult),
@@ -235,5 +314,10 @@ export function computeAll(candles, params = {}) {
     kdj: kdj(candles, params.kdjPeriod),
     dmi: dmi(candles, params.dmiPeriod),
     obv: obv(candles),
+    atr: atr(candles, params.atrPeriod),
+    vwap: vwapSeries(candles),
+    ema20: ema(closes, 20),
+    ema50: ema(closes, 50),
+    ema200: ema(closes, 200),
   };
 }

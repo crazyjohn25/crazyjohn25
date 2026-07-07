@@ -164,6 +164,65 @@ body {
 }
 .btn-small:hover { border-color: var(--accent); }
 
+/* Polymarket 面板 */
+.pm-box { font-size: 12px; line-height: 1.55; }
+.pm-box .pm-q { color: var(--text); margin-bottom: 4px; }
+.pm-box .pm-odds { display: flex; gap: 8px; margin: 6px 0; }
+.pm-box .pm-odd {
+  flex: 1;
+  text-align: center;
+  border-radius: 4px;
+  padding: 6px 4px;
+  font-weight: 700;
+  font-size: 14px;
+}
+.pm-box .pm-odd.up { background: rgba(38,166,154,.15); color: var(--buy); }
+.pm-box .pm-odd.down { background: rgba(239,83,80,.15); color: var(--sell); }
+.pm-box .pm-odd small { display: block; font-weight: 400; font-size: 11px; color: var(--muted); }
+.pm-box .pm-action {
+  display: inline-block;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 4px;
+  margin: 4px 0;
+}
+.pm-box .pm-action.up { background: rgba(38,166,154,.2); color: var(--buy); }
+.pm-box .pm-action.down { background: rgba(239,83,80,.2); color: var(--sell); }
+.pm-box .pm-action.hold { background: rgba(124,135,155,.2); color: var(--muted); }
+.pm-box ul { list-style: none; margin: 4px 0 0; padding: 0; color: var(--muted); }
+.pm-box ul li { padding: 2px 0; border: none; }
+.pm-box .pm-strike { color: #e6b800; }
+.pm-box .pm-big { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 5px; }
+.pm-box a { color: var(--accent); text-decoration: none; }
+
+/* 复盘面板 */
+.review-box { font-size: 12px; line-height: 1.5; }
+.review-box .rv-stat { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.review-box .rv-rate.good { color: var(--buy); }
+.review-box .rv-rate.bad { color: var(--sell); }
+.review-box .rv-reflect {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(230,184,0,.08);
+  border-left: 3px solid #e6b800;
+  border-radius: 3px;
+  color: var(--muted);
+}
+.review-box .rv-item { padding: 4px 0; border-bottom: 1px solid var(--border); color: var(--muted); }
+.review-box .rv-hit { color: var(--buy); font-weight: 600; }
+.review-box .rv-miss { color: var(--sell); font-weight: 600; }
+
+/* 交易计划 */
+.advisor-box .plan {
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: rgba(77,148,255,.08);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* 成交量对比表 */
 .vol-summary { font-size: 12px; color: var(--muted); margin-bottom: 6px; line-height: 1.5; }
 .vol-table {

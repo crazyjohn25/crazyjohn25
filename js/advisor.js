@@ -4,7 +4,7 @@
  * 按打分规则得出各周期多空倾向，再按周期权重加权出总建议（买入/卖出/观望），
  * 输出建议理由与解读。每30分钟自动刷新一次。
  */
-import { computeAll } from './indicators.js';
+import { computeAll, swingLevels } from './indicators.js';
 
 export const TIMEFRAMES = ['15m', '30m', '1h', '4h'];
 export const TF_WEIGHTS = { '15m': 1, '30m': 1.5, '1h': 2, '4h': 3 };
@@ -144,7 +144,74 @@ export function analyzeTimeframe(candles) {
     }
   }
 
-  return { score, verdict: verdictOf(score), reasons };
+  // --- EMA20/50/200 均线排列（趋势交易员首要参考） ---
+  const { ema20, ema50, ema200 } = ind;
+  if (ema20[i] !== null && ema50[i] !== null) {
+    const aboveLong = ema200[i] === null || c.close > ema200[i];
+    if (ema20[i] > ema50[i] && c.close > ema20[i] && aboveLong) {
+      score += 1;
+      reasons.push(
+        `均线多头排列：价格>EMA20(${ema20[i].toFixed(1)})>EMA50(${ema50[i].toFixed(1)})` +
+          (ema200[i] !== null ? `，且站上EMA200(${ema200[i].toFixed(1)})长期趋势线` : '')
+      );
+    } else if (ema20[i] < ema50[i] && c.close < ema20[i] && (ema200[i] === null || c.close < ema200[i])) {
+      score -= 1;
+      reasons.push(
+        `均线空头排列：价格<EMA20(${ema20[i].toFixed(1)})<EMA50(${ema50[i].toFixed(1)})` +
+          (ema200[i] !== null ? `，且失守EMA200(${ema200[i].toFixed(1)})` : '')
+      );
+    } else {
+      reasons.push('均线缠绕，趋势方向未明');
+    }
+  }
+
+  // --- VWAP（机构日内成本线） ---
+  const vwapV = ind.vwap[i];
+  if (vwapV !== null && vwapV > 0) {
+    const devPct = ((c.close - vwapV) / vwapV) * 100;
+    if (devPct > 0.05) {
+      score += 0.5;
+      reasons.push(`价格位于VWAP(${vwapV.toFixed(1)})上方${devPct.toFixed(2)}%，日内买方掌控`);
+    } else if (devPct < -0.05) {
+      score -= 0.5;
+      reasons.push(`价格位于VWAP(${vwapV.toFixed(1)})下方${Math.abs(devPct).toFixed(2)}%，日内卖方掌控`);
+    } else {
+      reasons.push(`价格贴近VWAP(${vwapV.toFixed(1)})，多空在成本线附近博弈`);
+    }
+  }
+
+  // --- ATR 波动率与支撑阻力位置 ---
+  const atrV = ind.atr[i];
+  const { support, resistance } = swingLevels(candles);
+  if (atrV !== null && support !== null && resistance !== null) {
+    const distSup = (c.close - support) / atrV;
+    const distRes = (resistance - c.close) / atrV;
+    if (distSup < 1 && score > 0) {
+      score += 0.5;
+      reasons.push(`价格距支撑${support.toFixed(1)}仅${distSup.toFixed(1)}个ATR，回调空间有限，做多盈亏比占优`);
+    } else if (distRes < 1 && score < 0) {
+      score -= 0.5;
+      reasons.push(`价格距阻力${resistance.toFixed(1)}仅${distRes.toFixed(1)}个ATR，上行空间受压`);
+    } else {
+      reasons.push(
+        `关键位：支撑${support.toFixed(1)} / 阻力${resistance.toFixed(1)}，ATR=${atrV.toFixed(1)}`
+      );
+    }
+  }
+
+  return {
+    score,
+    verdict: verdictOf(score),
+    reasons,
+    meta: {
+      close: c.close,
+      atr: atrV,
+      support,
+      resistance,
+      vwap: vwapV,
+      rsi: ind.rsi[i],
+    },
+  };
 }
 
 export function verdictOf(score) {
@@ -158,16 +225,17 @@ export function verdictOf(score) {
 /**
  * 综合多周期结果（纯函数）
  * @param {Object} perTf { '15m': {score,verdict,reasons}, ... }
- * @returns {{ overallScore, action, summary, perTf }}
+ * @param {Object} weights 各周期权重（可由复盘模块自适应调整），默认 TF_WEIGHTS
+ * @returns {{ overallScore, action, summary, perTf, plan }}
  */
-export function combineAdvice(perTf) {
+export function combineAdvice(perTf, weights = TF_WEIGHTS) {
   let weighted = 0;
   let totalW = 0;
   for (const tf of TIMEFRAMES) {
     const r = perTf[tf];
     if (!r || r.verdict === '数据不足') continue;
-    weighted += r.score * (TF_WEIGHTS[tf] || 1);
-    totalW += TF_WEIGHTS[tf] || 1;
+    weighted += r.score * (weights[tf] || 1);
+    totalW += weights[tf] || 1;
   }
   const overallScore = totalW > 0 ? weighted / totalW : 0;
 
@@ -191,19 +259,44 @@ export function combineAdvice(perTf) {
     conflict = '注意：大周期与小周期方向冲突，多为震荡或转折初期，建议降低仓位、等待共振。';
   }
 
+  // 交易计划：以1h的ATR与支撑阻力生成入场/止损/目标（顶尖交易员先算风险再看收益）
+  let plan = null;
+  const m = tf1h && tf1h.meta;
+  if (m && m.atr && (action.includes('买') || action.includes('多') || action.includes('卖') || action.includes('减'))) {
+    const long = action.includes('买') || action.includes('多');
+    const entry = m.close;
+    const stop = long
+      ? Math.min(entry - 1.5 * m.atr, m.support !== null ? m.support - 0.3 * m.atr : Infinity)
+      : Math.max(entry + 1.5 * m.atr, m.resistance !== null ? m.resistance + 0.3 * m.atr : -Infinity);
+    const target = long
+      ? (m.resistance !== null && m.resistance > entry ? m.resistance : entry + 2.5 * m.atr)
+      : (m.support !== null && m.support < entry ? m.support : entry - 2.5 * m.atr);
+    const risk = Math.abs(entry - stop);
+    const reward = Math.abs(target - entry);
+    plan = {
+      direction: long ? 'long' : 'short',
+      entry,
+      stop,
+      target,
+      rr: risk > 0 ? reward / risk : null,
+      note: `基于1h ATR(${m.atr.toFixed(1)})与摆动支撑/阻力计算；单笔风险建议不超过总资金1-2%`,
+    };
+  }
+
   const summary =
     `${parts.join('；')}。加权总分 ${overallScore.toFixed(2)}，综合建议【${action}】。` +
     (conflict ? ' ' + conflict : '') +
     ' 本建议由技术指标规则生成，仅供参考，不构成投资建议。';
 
-  return { overallScore, action, summary, perTf };
+  return { overallScore, action, summary, perTf, plan };
 }
 
 /**
  * 编排：拉取各周期K线并产出综合建议
  * @param {Function} fetchCandles (interval) => Promise<candles>
+ * @param {Object} opts { weights } 复盘模块可传入自适应权重
  */
-export async function runAdvisor(fetchCandles) {
+export async function runAdvisor(fetchCandles, opts = {}) {
   const perTf = {};
   await Promise.all(
     TIMEFRAMES.map(async (tf) => {
@@ -215,5 +308,8 @@ export async function runAdvisor(fetchCandles) {
       }
     })
   );
-  return { ...combineAdvice(perTf), updatedAt: Math.floor(Date.now() / 1000) };
+  return {
+    ...combineAdvice(perTf, opts.weights || TF_WEIGHTS),
+    updatedAt: Math.floor(Date.now() / 1000),
+  };
 }
