@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- TradingView 开源图表库 lightweight-charts -->
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">K线智能分析终端</div>
+    <div class="controls">
+      <label>品种
+        <select id="symbolSelect">
+          <option value="BTCUSDT">BTC/USDT</option>
+          <option value="ETHUSDT">ETH/USDT</option>
+          <option value="SOLUSDT">SOL/USDT</option>
+          <option value="BNBUSDT">BNB/USDT</option>
+        </select>
+      </label>
+      <label>周期
+        <select id="intervalSelect">
+          <option value="15m">15分钟</option>
+          <option value="1h" selected>1小时</option>
+          <option value="4h">4小时</option>
+          <option value="1d">日线</option>
+        </select>
+      </label>
+      <label>副图指标
+        <select id="subIndicatorSelect">
+          <option value="rsi" selected>RSI</option>
+          <option value="kdj">KDJ</option>
+          <option value="dmi">DMI</option>
+          <option value="obv">OBV</option>
+        </select>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="toggleEvents" checked /> 宏观事件
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="toggleSignals" checked /> 买卖信号
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="toggleMute" /> 静音
+      </label>
+      <span id="connStatus" class="status">连接中…</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="charts">
+      <div id="mainChart" class="chart main"></div>
+      <div id="macdChart" class="chart sub"></div>
+      <div id="subChart" class="chart sub"></div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="panel">
+        <h3>最新信号</h3>
+        <ul id="signalList" class="signal-list"></ul>
+      </div>
+
+      <div class="panel">
+        <h3>宏观事件</h3>
+        <ul id="eventList" class="event-list"></ul>
+        <details class="add-event">
+          <summary>+ 添加自定义事件</summary>
+          <form id="eventForm">
+            <input type="datetime-local" id="evtTime" required />
+            <input type="text" id="evtTitle" placeholder="事件标题，如：美联储加息50bp" required maxlength="60" />
+            <select id="evtCategory">
+              <option value="fed">美联储/货币政策</option>
+              <option value="geo">地缘政治</option>
+              <option value="oil">石油/大宗商品</option>
+              <option value="sector">细分赛道</option>
+              <option value="breaking">突发行情</option>
+              <option value="other">其他</option>
+            </select>
+            <select id="evtImpact">
+              <option value="high">高影响</option>
+              <option value="medium" selected>中影响</option>
+              <option value="low">低影响</option>
+            </select>
+            <input type="text" id="evtNote" placeholder="备注（可选）" maxlength="120" />
+            <button type="submit">添加</button>
+          </form>
+        </details>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toastContainer" class="toast-container"></div>
+  <div id="tooltip" class="tooltip hidden"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

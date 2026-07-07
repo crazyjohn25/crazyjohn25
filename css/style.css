@@ -1,0 +1,224 @@
+:root {
+  --bg: #10141c;
+  --panel: #171d29;
+  --border: #263043;
+  --text: #d7dde8;
+  --muted: #7c879b;
+  --buy: #26a69a;
+  --sell: #ef5350;
+  --accent: #4d94ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.controls label { color: var(--muted); }
+
+.controls select {
+  margin-left: 4px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.checkbox input { vertical-align: middle; }
+
+.status { color: var(--muted); font-size: 12px; }
+.status.ok { color: var(--buy); }
+.status.err { color: var(--sell); }
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 10px;
+  padding: 10px;
+  height: calc(100vh - 56px);
+}
+
+.charts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chart {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  position: relative;
+  min-height: 0;
+}
+.chart.main { flex: 3; }
+.chart.sub { flex: 1; }
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.panel h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.signal-list, .event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.signal-list li, .event-list li {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  line-height: 1.45;
+}
+
+.signal-list .side-buy { color: var(--buy); font-weight: 600; }
+.signal-list .side-sell { color: var(--sell); font-weight: 600; }
+.signal-list .reasons, .event-list .note { color: var(--muted); font-size: 12px; }
+.signal-list .time, .event-list .time { color: var(--muted); font-size: 12px; }
+
+.event-list .cat {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: #fff;
+  margin-right: 6px;
+}
+
+.event-list .del {
+  float: right;
+  cursor: pointer;
+  color: var(--muted);
+  border: none;
+  background: none;
+  font-size: 12px;
+}
+.event-list .del:hover { color: var(--sell); }
+
+.add-event summary {
+  cursor: pointer;
+  color: var(--accent);
+  margin: 8px 0 4px;
+}
+
+.add-event form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.add-event input, .add-event select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 6px;
+}
+
+.add-event button {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  border-radius: 4px;
+  padding: 6px;
+  cursor: pointer;
+}
+
+.toast-container {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+}
+
+.toast {
+  background: var(--panel);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px;
+  padding: 10px 14px;
+  min-width: 240px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  animation: slideIn .25s ease;
+}
+.toast.buy { border-left-color: var(--buy); }
+.toast.sell { border-left-color: var(--sell); }
+.toast .t-title { font-weight: 600; margin-bottom: 3px; }
+.toast .t-body { color: var(--muted); font-size: 12px; }
+
+@keyframes slideIn {
+  from { transform: translateX(30px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.tooltip {
+  position: fixed;
+  background: #0c0f15;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px 10px;
+  max-width: 300px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 200;
+}
+.tooltip.hidden { display: none; }
+.tooltip .tt-title { font-weight: 600; margin-bottom: 3px; }
+.tooltip .tt-note { color: var(--muted); }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; height: auto; }
+  .chart.main { height: 380px; }
+  .chart.sub { height: 140px; }
+}
