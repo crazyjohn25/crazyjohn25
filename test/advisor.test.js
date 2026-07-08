@@ -75,13 +75,18 @@ test('combineAdvice 大小周期冲突时提示', () => {
   assert.ok(r.summary.includes('冲突'));
 });
 
-test('runAdvisor 编排四个周期并容错', async () => {
+test('runAdvisor 编排三周期策略并容错', async () => {
   const result = await runAdvisor(async (tf) => {
     if (tf === '4h') throw new Error('network');
     return trend(200, 1);
   });
-  for (const tf of TIMEFRAMES) assert.ok(result.perTf[tf]);
+  assert.ok(Array.isArray(result.strategies));
+  assert.equal(result.strategies.length, 3);
   assert.equal(result.perTf['4h'].verdict, '数据不足');
+  // 4h失败时中短线策略应报数据不足，其余正常
+  const mid = result.strategies.find((s) => s.key === 'mid');
+  assert.equal(mid.action, '数据不足');
+  const short = result.strategies.find((s) => s.key === 'short');
+  assert.notEqual(short.action, '数据不足');
   assert.ok(typeof result.updatedAt === 'number');
-  assert.ok(result.summary.length > 10);
 });

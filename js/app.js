@@ -22,7 +22,8 @@ import {
 import { hourlyVolumeStats, rolling24hVolume, formatVolume } from './volume.js';
 import { detectCandleAnomalies, WhaleFeed } from './anomaly.js';
 import { fetchNews } from './news.js';
-import { runAdvisor, TIMEFRAMES, TF_WEIGHTS } from './advisor.js';
+import { runAdvisor, STRATEGIES } from './advisor.js';
+import { PaperWallet } from './wallet.js';
 import {
   currentWindowStart,
   fetchWindowMarket,
@@ -32,7 +33,7 @@ import {
   analyzeTrades,
   advise5m,
 } from './polymarket.js';
-import { ReviewLog, adaptWeights } from './review.js';
+import { ReviewLog } from './review.js';
 import { interpret } from './interpret.js';
 import {
   SERENITY_PICKS,
@@ -84,6 +85,7 @@ const alerts = new AlertManager({ onAlert: showToast });
 const whaleFeed = new WhaleFeed(30);
 const reviewLog = new ReviewLog();
 const pmHistory = new PmHistory();
+const wallet = new PaperWallet();
 
 /** Polymarket 5m 状态（仅BTC品种启用） */
 const pm = {
@@ -241,6 +243,7 @@ function onRealtimeBar(bar, isClosed) {
 
   // 每个tick只做轻量增量更新（O(1)），避免全量重算导致卡顿
   candleSeries.update(bar);
+  walletMark(state.symbol, bar.close);
   volumeSeries.update({
     time: bar.time,
     value: bar.volume,
@@ -393,59 +396,112 @@ function renderSubIndicator() {
 
 // ---------------- 综合建议 + 成交量对比（每30分钟刷新） ----------------
 
+/** 新闻面偏向：近24小时高/中影响新闻的多空净值（-1~1） */
+function computeNewsBias() {
+  const now = Math.floor(Date.now() / 1000);
+  let sum = 0;
+  let bull = 0;
+  let bear = 0;
+  for (const e of state.newsEvents || []) {
+    if (now - e.time > 86400) continue;
+    const it = interpret(e.title);
+    const w = e.impact === 'high' ? 1 : 0.4;
+    if (it.bias === 'bullish') {
+      sum += w;
+      bull++;
+    } else if (it.bias === 'bearish') {
+      sum -= w;
+      bear++;
+    }
+  }
+  if (bull + bear === 0) return null;
+  const score = Math.tanh(sum / 4);
+  return {
+    score,
+    reason: `新闻面（24h）：利好${bull}条 vs 利空${bear}条，净偏向${score >= 0 ? '偏多' : '偏空'}（${(score * 100).toFixed(0)}%权重按周期递减）`,
+  };
+}
+
+/** 复盘经验：三层策略各自的近期命中率 */
+function strategyExperience() {
+  const stats = reviewLog.stats();
+  const out = {};
+  for (const st of STRATEGIES) {
+    const s = stats[`advisor:${st.key}`];
+    if (s) out[st.key] = s;
+  }
+  return out;
+}
+
 async function refreshAdvisorAndVolume() {
   const box = $('advisorBox');
   box.innerHTML = '<div class="advisor-loading">分析中…</div>';
 
   const fetchCandles = async (tf) => {
-    if (state.usingMock) return generateMockHistory(tf, 400);
-    const c = await fetchHistory(state.symbol, tf, 400);
+    if (state.usingMock) return generateMockHistory(tf, tf === '1d' ? 250 : 400);
+    const c = await fetchHistory(state.symbol, tf, tf === '1d' ? 250 : 400);
     if (tf === '1h') state.candles1h = c;
     return c;
   };
 
-  // 复盘：先结算到期预测，再用自适应权重出新建议
+  // 先结算到期预测，经验修正注入本轮建议
   settleReviews();
-  const { weights, reflections } = adaptWeights(reviewLog.stats(), TF_WEIGHTS);
-  state.reflections = reflections;
 
   try {
-    state.advice = await runAdvisor(fetchCandles, { weights });
+    state.advice = await runAdvisor(fetchCandles, {
+      newsBias: computeNewsBias(),
+      experience: strategyExperience(),
+    });
   } catch (_) {
     state.advice = null;
   }
   if (state.usingMock) state.candles1h = generateMockHistory('1h', 400);
 
   recordAdvisorPredictions();
+  notifyMajorSignals();
+  considerAutoTrades();
   renderAdvisor();
   renderVolumePanel();
   renderReviewPanel();
+  renderWalletTab();
 }
 
 // ---------------- 建议复盘：登记、结算、反思 ----------------
 
-const TF_HORIZON = { '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400 };
-
-/** 登记本轮综合建议的各周期预测（到期后与实际对照） */
+/** 登记本轮三层策略的方向预测（按各自持有周期到期验证） */
 function recordAdvisorPredictions() {
   const adv = state.advice;
   if (!adv || state.usingMock) return;
   const now = Math.floor(Date.now() / 1000);
   const price = state.candles.length ? state.candles[state.candles.length - 1].close : null;
   if (!price) return;
-  for (const tf of TIMEFRAMES) {
-    const r = adv.perTf[tf];
-    if (!r || r.verdict === '数据不足') continue;
-    const direction = r.score >= 0.75 ? 'up' : r.score <= -0.75 ? 'down' : 'flat';
-    if (direction === 'flat') continue; // 只复盘有方向的判断
+  for (const st of adv.strategies) {
+    if (st.action === '观望' || st.action === '数据不足') continue;
+    const direction = st.score > 0 ? 'up' : 'down';
     reviewLog.record({
-      source: `advisor:${tf}`,
+      source: `advisor:${st.key}`,
       symbol: state.symbol,
       direction,
       priceAtCall: price,
       callTime: now,
-      evalTime: now + TF_HORIZON[tf],
-      note: r.verdict,
+      evalTime: now + st.holdSec,
+      note: st.action,
+    });
+  }
+}
+
+/** 重大信号：置顶 + 提示音推送 */
+function notifyMajorSignals() {
+  const adv = state.advice;
+  if (!adv || state.usingMock) return;
+  for (const st of adv.strategies) {
+    if (!st.major) continue;
+    const isBuy = st.score > 0;
+    alerts.fireRisk({
+      key: `major|${state.symbol}|${st.key}|${Math.floor(Date.now() / 1800000)}`,
+      title: `⚡重大信号 ${getSymbol(state.symbol).label} ${st.label}：${st.action}`,
+      body: `评分${st.score.toFixed(1)} · 置信度${(st.conf * 100).toFixed(0)}%` + (st.plan ? ` · 入场${st.plan.entry.toFixed(1)} 止损${st.plan.stop.toFixed(1)} 目标${st.plan.target.toFixed(1)}` : ''),
+      kind: isBuy ? 'buy' : 'sell',
     });
   }
 }
@@ -485,8 +541,14 @@ function renderReviewPanel() {
     return;
   }
 
-  const SRC_LABEL = (s) =>
-    s.startsWith('advisor:') ? `综合建议 ${s.split(':')[1]}` : s === 'polymarket:5m' ? 'PM 5分钟' : s;
+  const STRATEGY_NAMES = { short: '短线1-6h', mid: '中短线6-24h', long: '长线1-3天' };
+  const SRC_LABEL = (s) => {
+    if (s.startsWith('advisor:')) {
+      const k = s.split(':')[1];
+      return `建议·${STRATEGY_NAMES[k] || k}`;
+    }
+    return s === 'polymarket:5m' ? 'PM 5分钟' : s;
+  };
 
   const statHtml = entries
     .map(([src, s]) => {
@@ -516,12 +578,6 @@ function renderReviewPanel() {
   );
 }
 
-function verdictClass(score) {
-  if (score >= 1) return 'bull';
-  if (score <= -1) return 'bear';
-  return 'flat';
-}
-
 function actionClass(action) {
   if (action.includes('买') || action.includes('多')) return 'buy';
   if (action.includes('卖') || action.includes('减')) return 'sell';
@@ -535,32 +591,35 @@ function renderAdvisor() {
     box.innerHTML = '<div class="advisor-loading">分析失败，请点击下方按钮重试</div>';
     return;
   }
-  const tfRows = TIMEFRAMES.map((tf) => {
-    const r = adv.perTf[tf];
-    if (!r) return '';
-    const cls = verdictClass(r.score);
-    const reasons = r.reasons.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
-    return (
-      `<details class="tf-row"><summary class="tf-head">` +
-      `<span class="tf-name">${tf}</span>` +
-      `<span class="tf-verdict ${cls}">${escapeHtml(r.verdict)}（${r.score.toFixed(1)}分）</span>` +
-      `</summary><ul class="tf-reasons">${reasons}</ul></details>`
-    );
-  }).join('');
 
-  const planHtml = adv.plan
-    ? `<div class="plan"><b>交易计划（${adv.plan.direction === 'long' ? '做多' : '做空'}）</b><br>` +
-      `入场 ${adv.plan.entry.toFixed(1)} · 止损 ${adv.plan.stop.toFixed(1)} · 目标 ${adv.plan.target.toFixed(1)}` +
-      (adv.plan.rr ? ` · 盈亏比 1:${adv.plan.rr.toFixed(1)}` : '') +
-      `<br>${escapeHtml(adv.plan.note)}</div>`
-    : '';
+  // 重大信号置顶
+  const ordered = [...adv.strategies].sort((a, b) => Number(b.major) - Number(a.major));
+
+  const cards = ordered
+    .map((st) => {
+      const planHtml = st.plan
+        ? `<div class="plan"><b>交易计划（${st.plan.direction === 'long' ? '做多' : '做空'}·杠杆≤${st.plan.leverage}x）</b><br>` +
+          `入场 ${st.plan.entry.toFixed(1)} · 止损 ${st.plan.stop.toFixed(1)} · 目标 ${st.plan.target.toFixed(1)}` +
+          (st.plan.rr ? ` · 盈亏比 1:${st.plan.rr.toFixed(1)}` : '') +
+          `<br>${escapeHtml(st.plan.note)}</div>`
+        : '';
+      const reasons = st.reasons.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
+      return (
+        `<div class="st-card ${st.major ? 'major' : ''}">` +
+        `<div class="st-head"><span class="st-label">${st.major ? '🔔 ' : ''}${escapeHtml(st.label)}</span>` +
+        `<span class="action ${actionClass(st.action)}">${escapeHtml(st.action)}</span></div>` +
+        `<div class="sy-note">评分 ${st.score.toFixed(1)} · 置信度 ${(st.conf * 100).toFixed(0)}%</div>` +
+        planHtml +
+        `<details class="tf-row"><summary class="tf-head"><span class="tf-name">推理依据（${st.reasons.length}条）</span></summary>` +
+        `<ul class="tf-reasons">${reasons}</ul></details>` +
+        `</div>`
+      );
+    })
+    .join('');
 
   box.innerHTML =
-    `<span class="action ${actionClass(adv.action)}">${escapeHtml(adv.action)}</span>` +
-    `<span class="upd"> 更新于 ${formatTime(adv.updatedAt)}${state.usingMock ? '（模拟数据）' : ''}</span>` +
-    `<div class="summary">${escapeHtml(adv.summary)}</div>` +
-    planHtml +
-    tfRows;
+    `<span class="upd">更新于 ${formatTime(adv.updatedAt)}${state.usingMock ? '（模拟数据）' : ''} · 建议已融合新闻面与历史复盘经验</span>` +
+    cards;
 }
 
 function renderVolumePanel() {
@@ -876,67 +935,92 @@ async function refreshPolymarket() {
     pm.flow = analyzeTrades(trades.filter((t) => Number(t.timestamp) >= winStart));
 
     const secondsLeft = Math.max(0, pm.window.endSec - Math.floor(Date.now() / 1000));
-    pm.advice = advise5m({
-      candles1m: pm.candles1m,
-      strikePrice: pm.strike,
-      upPrice: pm.window.upPrice,
-      flow: pm.flow,
-      book: pm.bookInfo,
-      secondsLeft,
-    });
 
-    // 复盘登记：每窗口只记一次有方向的建议
-    if (
-      (pm.advice.action === '买Up' || pm.advice.action === '买Down') &&
-      pm.lastRecordWindow !== winStart &&
-      pm.candles1m.length
-    ) {
-      pm.lastRecordWindow = winStart;
-      reviewLog.record({
-        source: 'polymarket:5m',
-        symbol: 'BTCUSDT',
-        direction: pm.advice.action === '买Up' ? 'up' : 'down',
-        priceAtCall: pm.strike ?? pm.candles1m[pm.candles1m.length - 1].close,
-        callTime: Math.floor(Date.now() / 1000),
-        evalTime: pm.window.endSec,
-        note: `edge=${(pm.advice.edge * 100).toFixed(1)}分`,
-      });
-    }
-
-    // 方向信号提示音（每窗口一次）
-    if (pm.advice.action === '买Up' || pm.advice.action === '买Down') {
-      alerts.fireRisk({
-        key: `pmcall|${winStart}|${pm.advice.action}`,
-        title: `Polymarket 5分钟信号：${pm.advice.action}`,
-        body: `置信度${(pm.advice.conf * 100).toFixed(0)}% · 成本${pm.advice.cost !== null ? (pm.advice.cost * 100).toFixed(0) + '¢' : '-'} · 期望ROI ${pm.advice.evRoiPct !== null ? (pm.advice.evRoiPct >= 0 ? '+' : '') + pm.advice.evRoiPct.toFixed(0) + '%' : '-'}`,
-        kind: pm.advice.action === '买Up' ? 'buy' : 'sell',
-      });
-    }
-
-    // 5分钟历史快照：每窗口登记完整推理依据（含观望，供回滚查看）
-    if (pm.strike && pm.candles1m.length) {
-      const cur = pm.candles1m[pm.candles1m.length - 1].close;
-      pmHistory.record({
-        winStart,
-        winEnd: pm.window.endSec,
-        action: pm.advice.action,
-        edge: pm.advice.edge,
-        techProb: pm.advice.techProb,
-        cost: pm.advice.cost,
-        potentialRoiPct: pm.advice.potentialRoiPct,
-        evRoiPct: pm.advice.evRoiPct,
-        strike: pm.strike,
-        priceAtCall: cur,
-        secondsLeftAtCall: secondsLeft,
-        leadPct: ((cur - pm.strike) / pm.strike) * 100,
-        flowBias:
-          pm.flow && pm.flow.upFlow + pm.flow.downFlow > 0
-            ? pm.flow.netUpFlow / (pm.flow.upFlow + pm.flow.downFlow)
-            : null,
-        bookImbalance: pm.bookInfo ? pm.bookInfo.imbalance : null,
+    // ===== 每期只给一次建议：剩余≤150秒时一次性决策并锁定 =====
+    if (pm.lockedWindow === winStart) {
+      pm.advice = pm.lockedAdvice; // 已锁定，本期不再改口
+    } else if (secondsLeft <= 150 && secondsLeft >= 25) {
+      pm.advice = advise5m({
+        candles1m: pm.candles1m,
+        strikePrice: pm.strike,
         upPrice: pm.window.upPrice,
-        reasons: pm.advice.reasons,
+        flow: pm.flow,
+        book: pm.bookInfo,
+        secondsLeft,
       });
+      pm.lockedWindow = winStart;
+      pm.lockedAdvice = pm.advice;
+
+      // 锁定时点登记历史快照（每窗口唯一）
+      if (pm.strike && pm.candles1m.length) {
+        const cur = pm.candles1m[pm.candles1m.length - 1].close;
+        pmHistory.record({
+          winStart,
+          winEnd: pm.window.endSec,
+          action: pm.advice.action,
+          edge: pm.advice.edge,
+          techProb: pm.advice.techProb,
+          cost: pm.advice.cost,
+          potentialRoiPct: pm.advice.potentialRoiPct,
+          evRoiPct: pm.advice.evRoiPct,
+          strike: pm.strike,
+          priceAtCall: cur,
+          secondsLeftAtCall: secondsLeft,
+          leadPct: ((cur - pm.strike) / pm.strike) * 100,
+          flowBias:
+            pm.flow && pm.flow.upFlow + pm.flow.downFlow > 0
+              ? pm.flow.netUpFlow / (pm.flow.upFlow + pm.flow.downFlow)
+              : null,
+          bookImbalance: pm.bookInfo ? pm.bookInfo.imbalance : null,
+          upPrice: pm.window.upPrice,
+          reasons: pm.advice.reasons,
+        });
+      }
+
+      if (pm.advice.action === '买Up' || pm.advice.action === '买Down') {
+        // 复盘登记
+        reviewLog.record({
+          source: 'polymarket:5m',
+          symbol: 'BTCUSDT',
+          direction: pm.advice.action === '买Up' ? 'up' : 'down',
+          priceAtCall: pm.strike ?? pm.candles1m[pm.candles1m.length - 1].close,
+          callTime: Math.floor(Date.now() / 1000),
+          evalTime: pm.window.endSec,
+          note: `本期唯一决策`,
+        });
+        // 提示音
+        alerts.fireRisk({
+          key: `pmcall|${winStart}|${pm.advice.action}`,
+          title: `Polymarket 5分钟信号：${pm.advice.action}（本期唯一建议）`,
+          body: `置信度${(pm.advice.conf * 100).toFixed(0)}% · 成本${pm.advice.cost !== null ? (pm.advice.cost * 100).toFixed(0) + '¢' : '-'} · 期望ROI ${pm.advice.evRoiPct !== null ? (pm.advice.evRoiPct >= 0 ? '+' : '') + pm.advice.evRoiPct.toFixed(0) + '%' : '-'}`,
+          kind: pm.advice.action === '买Up' ? 'buy' : 'sell',
+        });
+        // 模拟钱包按置信度下注 $50-100
+        if (pm.advice.cost !== null && pm.advice.evRoiPct !== null && pm.advice.evRoiPct >= 10) {
+          const stake = pm.advice.conf >= 0.6 ? 100 : pm.advice.conf >= 0.4 ? 75 : 50;
+          wallet.placePmBet({
+            winStart,
+            side: pm.advice.action === '买Up' ? 'up' : 'down',
+            cost: pm.advice.cost,
+            stake,
+            time: Math.floor(Date.now() / 1000),
+            reason: `置信度${(pm.advice.conf * 100).toFixed(0)}%·期望ROI+${pm.advice.evRoiPct.toFixed(0)}%`,
+          });
+          renderWalletTab();
+        }
+      }
+    } else if (secondsLeft > 150) {
+      pm.advice = {
+        action: '等待盘尾统一决策（剩余2.5分钟时一次性给出本期唯一建议）',
+        conf: 0, cost: null, potentialRoiPct: null, evRoiPct: null, edge: 0, techProb: null,
+        reasons: ['纪律：每期只做一次决策，不中途改口', '决策点：剩余150秒时综合K线动能/量能/订单簿/大单一次性判断'],
+      };
+    } else {
+      pm.advice = {
+        action: '本期未在决策窗口出手，等待下一期',
+        conf: 0, cost: null, potentialRoiPct: null, evRoiPct: null, edge: 0, techProb: null,
+        reasons: ['本期决策窗口已错过（页面可能刚打开或数据延迟），下期将正常决策'],
+      };
     }
     settlePmHistory();
 
@@ -948,10 +1032,10 @@ async function refreshPolymarket() {
   }
 }
 
-/** 结算5分钟历史：用1分钟K线还原窗口结束价 */
+/** 结算5分钟历史：用1分钟K线还原窗口结束价，并结算模拟钱包PM注单 */
 function settlePmHistory() {
   if (!pm.candles1m.length) return;
-  pmHistory.settle((timeSec) => {
+  const settled = pmHistory.settle((timeSec) => {
     // 窗口结束价 = 覆盖该时刻的1分钟K线收盘价
     for (let i = pm.candles1m.length - 1; i >= 0; i--) {
       const c = pm.candles1m[i];
@@ -959,6 +1043,20 @@ function settlePmHistory() {
     }
     return null;
   });
+  let anyBet = false;
+  for (const r of settled) {
+    const res = wallet.settlePmBet(r.winStart, r.outcome);
+    if (res) {
+      anyBet = true;
+      alerts.fireRisk({
+        key: `pmsettle|${r.winStart}`,
+        title: `PM注单结算：${res.won ? '✓盈利' : '✗亏损'} ${res.pnl >= 0 ? '+' : ''}$${res.pnl.toFixed(0)}`,
+        body: `${res.side === 'up' ? '押涨' : '押跌'} $${res.stake} @${(res.cost * 100).toFixed(0)}¢ → ROI ${res.roiPct >= 0 ? '+' : ''}${res.roiPct.toFixed(0)}%`,
+        kind: res.won ? 'buy' : 'sell',
+      });
+    }
+  }
+  if (anyBet) renderWalletTab();
 }
 
 function renderPmStats() {
@@ -1314,6 +1412,139 @@ async function refreshSerenityFeed() {
   );
 }
 
+// ---------------- 模拟交易钱包 ----------------
+
+/** 高置信策略信号自动开仓（重大信号 + 有交易计划才出手，控制频率与风险） */
+function considerAutoTrades() {
+  const adv = state.advice;
+  if (!adv || !state.candles.length) return;
+  const price = state.candles[state.candles.length - 1].close;
+  const now = Math.floor(Date.now() / 1000);
+  for (const st of adv.strategies) {
+    if (!st.major || !st.plan) continue; // 只做多周期高度共振的重大信号
+    const res = wallet.openPosition({
+      symbol: state.symbol,
+      side: st.plan.direction,
+      price,
+      margin: 150,
+      leverage: st.leverage,
+      stop: st.plan.stop,
+      target: st.plan.target,
+      reason: `${st.label} ${st.action}（评分${st.score.toFixed(1)}）${state.usingMock ? '·模拟行情' : ''}`,
+      time: now,
+      strategy: st.key,
+    });
+    if (res && !res.rejected) {
+      alerts.fireRisk({
+        key: `walletopen|${res.id}`,
+        title: `模拟钱包开仓：${getSymbol(state.symbol).label} ${st.plan.direction === 'long' ? '做多' : '做空'} ${st.leverage}x`,
+        body: `保证金$150 · 入场${price.toFixed(1)} · 止损${st.plan.stop.toFixed(1)} · 目标${st.plan.target.toFixed(1)}`,
+        kind: st.plan.direction === 'long' ? 'buy' : 'sell',
+      });
+      renderWalletTab();
+    }
+  }
+}
+
+/** 价格驱动的持仓管理（止损/止盈/强平） */
+function walletMark(symbol, price) {
+  const closed = wallet.markPrice(symbol, price, Math.floor(Date.now() / 1000));
+  for (const t of closed) {
+    const causeLabel = { stop: '止损', target: '止盈', liquidated: '强平', manual: '手动' }[t.cause] || t.cause;
+    alerts.fireRisk({
+      key: `walletclose|${t.id}`,
+      title: `模拟钱包平仓（${causeLabel}）：${t.netPnl >= 0 ? '✓盈利' : '✗亏损'} ${t.netPnl >= 0 ? '+' : ''}$${t.netPnl.toFixed(1)}`,
+      body: `${t.symbol} ${t.side === 'long' ? '多' : '空'}${t.leverage}x · ${t.entry.toFixed(1)}→${t.exit.toFixed(1)} · ROI ${t.roiPct >= 0 ? '+' : ''}${t.roiPct.toFixed(1)}%`,
+      kind: t.netPnl >= 0 ? 'buy' : 'risk',
+    });
+  }
+  if (closed.length) renderWalletTab();
+}
+
+function renderWalletTab() {
+  const box = $('walletBox');
+  if (!box) return;
+  const prices = {};
+  if (state.candles.length) prices[state.symbol] = state.candles[state.candles.length - 1].close;
+  const spotEq = wallet.equitySpot(prices);
+  const pmEq = wallet.pmEquity();
+  const total = spotEq + pmEq;
+  const totalRet = ((total - 2000) / 2000) * 100;
+  const s = wallet.stats();
+  const pct = (x) => (x === null ? '-' : (x * 100).toFixed(0) + '%');
+
+  const posHtml = wallet.positions.length
+    ? wallet.positions
+        .map((p) => {
+          const px = prices[p.symbol] ?? p.lastPrice;
+          const u = wallet.unrealized(p, px);
+          const cls = u >= 0 ? 'up' : 'down';
+          return (
+            `<div class="rv-stat"><span>${escapeHtml(p.symbol)} ${p.side === 'long' ? '多' : '空'}${p.leverage}x <span class="sy-note">@${p.entry.toFixed(1)}</span></span>` +
+            `<span class="${cls}">${u >= 0 ? '+' : ''}$${u.toFixed(1)}（${((u / p.margin) * 100).toFixed(0)}%）</span></div>` +
+            `<div class="sy-note">止损${p.stop !== null ? p.stop.toFixed(1) : '-'} · 目标${p.target !== null ? p.target.toFixed(1) : '-'} · ${escapeHtml(p.reason)}</div>`
+          );
+        })
+        .join('')
+    : '<div class="sy-note">当前无持仓（只在重大信号出现时开仓，不频繁交易）</div>';
+
+  const betsHtml = wallet.bets.length
+    ? wallet.bets.map((b) => `<div class="sy-note">进行中：${b.side === 'up' ? '押涨' : '押跌'} $${b.stake} @${(b.cost * 100).toFixed(0)}¢（${formatTime(b.winStart)}期）</div>`).join('')
+    : '';
+
+  const closedHtml = wallet.closed
+    .slice(-8)
+    .reverse()
+    .map((t) => {
+      const cls = t.netPnl >= 0 ? 'rv-hit' : 'rv-miss';
+      const causeLabel = { stop: '止损', target: '止盈', liquidated: '强平', manual: '手动' }[t.cause] || t.cause;
+      return `<div class="rv-item"><span class="${cls}">${t.netPnl >= 0 ? '✓' : '✗'}</span> ${escapeHtml(t.symbol)} ${t.side === 'long' ? '多' : '空'}${t.leverage}x ${causeLabel} ${t.netPnl >= 0 ? '+' : ''}$${t.netPnl.toFixed(1)}（ROI ${t.roiPct.toFixed(0)}%）<br><span class="time">${formatTime(t.openTime)} → ${formatTime(t.exitTime)}</span></div>`;
+    })
+    .join('');
+
+  const betHistHtml = wallet.settledBets
+    .slice(-8)
+    .reverse()
+    .map((b) => `<div class="rv-item"><span class="${b.won ? 'rv-hit' : 'rv-miss'}">${b.won ? '✓' : '✗'}</span> PM ${b.side === 'up' ? '押涨' : '押跌'} $${b.stake} @${(b.cost * 100).toFixed(0)}¢ → ${b.pnl >= 0 ? '+' : ''}$${b.pnl.toFixed(0)}<br><span class="time">${formatTime(b.winStart)}期</span></div>`)
+    .join('');
+
+  const daily = wallet.dailyReturns(10);
+  const dailyHtml = daily.length
+    ? `<table class="sy-table"><thead><tr><th>日期</th><th>总资产</th><th>当日盈亏</th><th>收益率</th></tr></thead><tbody>` +
+      daily
+        .map((d) => `<tr><td>${d.dateLabel}</td><td>$${d.total.toFixed(0)}</td><td class="${d.pnl >= 0 ? 'up' : 'down'}">${d.pnl >= 0 ? '+' : ''}$${d.pnl.toFixed(1)}</td><td class="${(d.retPct ?? 0) >= 0 ? 'up' : 'down'}">${d.retPct !== null ? (d.retPct >= 0 ? '+' : '') + d.retPct.toFixed(2) + '%' : '-'}</td></tr>`)
+        .join('') +
+      `</tbody></table>`
+    : '<div class="sy-note">运行满一天后开始每日复盘</div>';
+
+  const hourly = wallet.hourlyReturns(12);
+  const hourlyHtml = hourly.length
+    ? hourly.map((h) => `<div class="rv-stat"><span>${formatTime(h.time)}</span><span class="${h.pnl >= 0 ? 'up' : 'down'}">${h.pnl >= 0 ? '+' : ''}$${h.pnl.toFixed(1)}${h.retPct !== null ? `（${h.retPct >= 0 ? '+' : ''}${h.retPct.toFixed(2)}%）` : ''}</span></div>`).join('')
+    : '<div class="sy-note">每小时快照积累中…</div>';
+
+  box.innerHTML =
+    `<div class="wallet-summary">` +
+    `<div class="w-total ${totalRet >= 0 ? 'up' : 'down'}">$${total.toFixed(1)} <small>${totalRet >= 0 ? '+' : ''}${totalRet.toFixed(2)}%</small></div>` +
+    `<div class="sy-note">合约钱包 $${spotEq.toFixed(1)}（现金$${wallet.cash.toFixed(1)}） · PM钱包 $${pmEq.toFixed(1)}（现金$${wallet.pmCash.toFixed(1)}）</div>` +
+    `<div class="sy-note">合约：${s.spotTrades}笔 胜率${pct(s.spotWinRate)} 净盈亏${s.spotNetPnl >= 0 ? '+' : ''}$${s.spotNetPnl.toFixed(1)} 手续费$${s.totalFees.toFixed(1)} · ` +
+    `PM：${s.pmBets}注 胜率${pct(s.pmWinRate)} 净盈亏${s.pmNetPnl >= 0 ? '+' : ''}$${s.pmNetPnl.toFixed(1)}</div>` +
+    `</div>` +
+    `<div class="bt-htitle">当前持仓</div>` + posHtml + betsHtml +
+    `<div class="bt-htitle" style="margin-top:8px">每日收益复盘</div>` + dailyHtml +
+    `<details style="margin-top:6px"><summary class="tf-head"><span class="tf-name">每小时收益（近12小时）</span></summary>${hourlyHtml}</details>` +
+    `<details style="margin-top:6px"><summary class="tf-head"><span class="tf-name">合约平仓历史</span></summary>${closedHtml || '<div class="sy-note">暂无</div>'}</details>` +
+    `<details style="margin-top:6px"><summary class="tf-head"><span class="tf-name">PM注单历史</span></summary>${betHistHtml || '<div class="sy-note">暂无</div>'}</details>` +
+    `<div class="rv-reflect" style="margin-top:6px">规则：初始$1000合约+$1000 PM · 单笔保证金$100-200 · 杠杆2-10x（短线5x/中短3x/长线2x） · ` +
+    `taker手续费0.05%/边 · 亏损95%强平 · 只做重大共振信号 · 同品种同策略6小时冷却 · 最多3仓 · PM每期唯一决策$50-100</div>`;
+}
+
+/** 每小时权益快照 */
+function walletSnapshot() {
+  const prices = {};
+  if (state.candles.length) prices[state.symbol] = state.candles[state.candles.length - 1].close;
+  wallet.snapshotEquity(Math.floor(Date.now() / 1000), prices);
+}
+
 // ---------------- 多品种后台信号监控（全交易对提示音） ----------------
 
 const watcherState = { timer: null, running: false };
@@ -1328,6 +1559,7 @@ async function watchAllSymbols() {
       try {
         const candles = await fetchHistory(sym.id, state.interval, 160);
         if (candles.length < 60) continue;
+        walletMark(sym.id, candles[candles.length - 1].close); // 持仓价格更新
         const ind = computeAll(candles);
         const signals = generateSignals(candles, ind);
         if (!signals.length) continue;
@@ -1457,6 +1689,21 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 
 $('backtestRun').addEventListener('click', runBacktestPanel);
 
+$('walletReset').addEventListener('click', () => {
+  if (!confirm('确认重置模拟钱包？将清空全部持仓、注单与收益记录。')) return;
+  wallet.cash = 1000;
+  wallet.pmCash = 1000;
+  wallet.positions = [];
+  wallet.closed = [];
+  wallet.bets = [];
+  wallet.settledBets = [];
+  wallet.equity = [];
+  wallet.lastEntry = {};
+  wallet.createdAt = Math.floor(Date.now() / 1000);
+  wallet._save();
+  renderWalletTab();
+});
+
 // ---------------- 真实新闻抓取 ----------------
 
 async function refreshNews() {
@@ -1537,3 +1784,7 @@ setInterval(() => {
 }, 60 * 1000);
 // 全品种信号监控：每2分钟轮询其他交易对，有信号即提示音+通知
 setInterval(watchAllSymbols, 2 * 60 * 1000);
+// 模拟钱包：每5分钟检查快照（内部按小时去重），每分钟刷新面板浮盈
+walletSnapshot();
+setInterval(walletSnapshot, 5 * 60 * 1000);
+setInterval(renderWalletTab, 60 * 1000);

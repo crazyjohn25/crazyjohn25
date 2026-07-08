@@ -226,6 +226,35 @@ body {
 .bt-hgroup { margin-top: 8px; }
 .bt-htitle { font-weight: 600; color: var(--accent); margin-bottom: 3px; font-size: 12px; }
 
+/* 策略卡片 */
+.st-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 8px;
+}
+.st-card.major {
+  border-color: #e6b800;
+  background: rgba(230,184,0,.05);
+  box-shadow: 0 0 8px rgba(230,184,0,.15);
+}
+.st-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.st-label { font-weight: 600; font-size: 13px; color: var(--text); }
+
+/* 模拟钱包 */
+.wallet-summary { margin-bottom: 8px; }
+.w-total { font-size: 24px; font-weight: 700; }
+.w-total small { font-size: 13px; font-weight: 600; }
+.w-total.up { color: var(--buy); }
+.w-total.down { color: var(--sell); }
+.review-box .up { color: var(--buy); }
+.review-box .down { color: var(--sell); }
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

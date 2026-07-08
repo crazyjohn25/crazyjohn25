@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=8" />
+  <link rel="stylesheet" href="css/style.css?v=9" />
   <!-- TradingView 开源图表库 lightweight-charts -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -71,6 +71,7 @@
     <aside class="sidebar">
       <nav class="tabbar">
         <button class="tab-btn active" data-tab="tabAdvice">建议</button>
+        <button class="tab-btn" data-tab="tabWallet">钱包</button>
         <button class="tab-btn" data-tab="tabBacktest">回测</button>
         <button class="tab-btn" data-tab="tabPm">PM5m</button>
         <button class="tab-btn" data-tab="tabNews">新闻</button>
@@ -81,7 +82,7 @@
       <!-- Tab 1: 综合建议 + 复盘 -->
       <div class="tab-page active" id="tabAdvice">
         <div class="panel" id="advisorPanel">
-          <h3>综合建议 <span class="h-note">15m/30m/1h/4h · 每30分钟更新</span></h3>
+          <h3>策略建议 <span class="h-note">短线1-6h · 中短线6-24h · 长线1-3天 · 30分钟更新</span></h3>
           <div id="advisorBox" class="advisor-box">
             <div class="advisor-loading">分析中…</div>
           </div>
@@ -90,6 +91,15 @@
         <div class="panel">
           <h3>建议复盘 <span class="h-note">预测 vs 实际 · 自动反思</span></h3>
           <div id="reviewBox" class="review-box"><div class="advisor-loading">暂无已结算的预测</div></div>
+        </div>
+      </div>
+
+      <!-- Tab: 模拟交易钱包 -->
+      <div class="tab-page" id="tabWallet">
+        <div class="panel">
+          <h3>模拟交易钱包 <span class="h-note">$1000合约 + $1000 PM · 自动执行高置信信号</span></h3>
+          <div id="walletBox" class="review-box"><div class="advisor-loading">初始化中…</div></div>
+          <button id="walletReset" class="btn-small">重置钱包（清空全部记录）</button>
         </div>
       </div>
 
@@ -206,6 +216,6 @@
   <div id="toastContainer" class="toast-container"></div>
   <div id="tooltip" class="tooltip hidden"></div>
 
-  <script type="module" src="js/app.js?v=8"></script>
+  <script type="module" src="js/app.js?v=9"></script>
 </body>
 </html>
