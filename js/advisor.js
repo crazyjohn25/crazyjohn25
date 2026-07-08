@@ -385,10 +385,14 @@ export function buildStrategyAdvice(perTf, opts = {}) {
       const stop = long
         ? Math.min(entry - st.stopAtr * m.atr, m.support !== null ? m.support - 0.2 * m.atr : Infinity)
         : Math.max(entry + st.stopAtr * m.atr, m.resistance !== null ? m.resistance + 0.2 * m.atr : -Infinity);
-      const target = long
+      let target = long
         ? (m.resistance !== null && m.resistance > entry ? m.resistance : entry + st.targetAtr * m.atr)
         : (m.support !== null && m.support < entry ? m.support : entry - st.targetAtr * m.atr);
       const risk = Math.abs(entry - stop);
+      // 若阻力/支撑目标太近导致盈亏比<1，退回ATR目标，保证风险回报合理
+      if (risk > 0 && Math.abs(target - entry) / risk < 1) {
+        target = long ? entry + st.targetAtr * m.atr : entry - st.targetAtr * m.atr;
+      }
       plan = {
         direction: long ? 'long' : 'short',
         entry,

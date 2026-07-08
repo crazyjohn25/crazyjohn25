@@ -1422,6 +1422,7 @@ function considerAutoTrades() {
   const now = Math.floor(Date.now() / 1000);
   for (const st of adv.strategies) {
     if (!st.major || !st.plan) continue; // 只做多周期高度共振的重大信号
+    if (st.plan.rr !== null && st.plan.rr < 1) continue; // 盈亏比<1不做，风险回报不对称
     const res = wallet.openPosition({
       symbol: state.symbol,
       side: st.plan.direction,
