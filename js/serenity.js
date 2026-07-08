@@ -156,34 +156,47 @@ export function buildSubIndices(daily, baseDaysAgo = 30, nowSec = Math.floor(Dat
 }
 
 /**
- * Serenity组合动态监控：抓取其重点持仓/推荐标的的最新新闻（近2天）
+ * Serenity组合动态监控：抓取其重点持仓/推荐标的的最新新闻（近3天）
  * 经 rss2json + Google News（X推文API需付费，无法直接抓取，本源作为公开替代信号）
+ * 注：rss2json对过长的OR查询会失败，拆成多个短查询并行合并。
  */
 export async function fetchSerenityFeed() {
-  const q = encodeURIComponent(
-    'AXTI OR AAOI OR Lumentum OR Coherent OR "Tower Semiconductor" OR Nebius OR "AXT Inc" when:2d'
-  );
-  const url = `https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
-  try {
-    const res = await fetch(
-      'https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(url),
-      { signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined }
-    );
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (data.status !== 'ok' || !Array.isArray(data.items)) return [];
-    return data.items
-      .map((it) => ({
+  const queries = [
+    'AXTI OR AAOI OR Lumentum when:3d',
+    'Coherent laser OR "Tower Semiconductor" OR Nebius when:3d',
+    '"applied optoelectronics" OR "AXT Inc" OR Fabrinet when:3d',
+  ];
+  const fetchOne = async (q) => {
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`;
+    try {
+      const res = await fetch(
+        'https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(url),
+        { signal: AbortSignal.timeout ? AbortSignal.timeout(12000) : undefined }
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      if (data.status !== 'ok' || !Array.isArray(data.items)) return [];
+      return data.items.map((it) => ({
         title: it.title || '',
         url: it.link || '',
         time: Math.floor(new Date(it.pubDate).getTime() / 1000) || 0,
-      }))
-      .filter((x) => x.title && x.time)
-      .sort((a, b) => b.time - a.time)
-      .slice(0, 10);
-  } catch (_) {
-    return [];
+      }));
+    } catch (_) {
+      return [];
+    }
+  };
+
+  const all = (await Promise.all(queries.map(fetchOne))).flat();
+  const seen = new Set();
+  const out = [];
+  for (const x of all.sort((a, b) => b.time - a.time)) {
+    if (!x.title || !x.time) continue;
+    const key = x.title.slice(0, 50);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(x);
   }
+  return out.slice(0, 12);
 }
 
 /**
