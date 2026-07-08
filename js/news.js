@@ -27,7 +27,32 @@ export const NEWS_FEEDS = [
     source: 'MicroStrategy追踪',
     url: 'https://news.google.com/rss/search?q=microstrategy%20OR%20%22michael%20saylor%22%20bitcoin&hl=en-US&gl=US&ceid=US:en',
   },
+  { source: 'Yahoo加密', url: 'https://finance.yahoo.com/news/rssindex' },
+  {
+    source: 'Google加密快讯',
+    url: 'https://news.google.com/rss/search?q=(crypto%20OR%20bitcoin%20OR%20ethereum)%20when:2d&hl=en-US&gl=US&ceid=US:en',
+  },
 ];
+
+/** 按当前品种动态生成的"最新微观新闻"检索源（更聚焦、更新快） */
+const SYMBOL_SEARCH = {
+  BTC: 'Bitcoin OR BTC price when:2d',
+  ETH: 'Ethereum OR ETH crypto when:2d',
+  SOL: 'Solana SOL crypto when:3d',
+  BNB: 'BNB Binance coin when:3d',
+  HYPE: 'Hyperliquid HYPE crypto when:5d',
+  NDX: 'Nasdaq 100 OR Nvidia OR AI semiconductor stocks when:2d',
+};
+
+function symbolSearchFeed(base) {
+  const q = SYMBOL_SEARCH[base];
+  if (!q) return null;
+  return {
+    source: '最新检索',
+    url: `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`,
+    fresh: true, // 该源结果直接视为相关，不再过滤
+  };
+}
 
 /** 品种相关关键词（标题命中即认为与交易对相关） */
 const SYMBOL_KEYWORDS = {
@@ -90,6 +115,7 @@ async function fetchFeed(feed) {
     if (data.status !== 'ok' || !Array.isArray(data.items)) return [];
     return data.items.map((it) => ({
       source: feed.source,
+      fresh: Boolean(feed.fresh),
       title: it.title || '',
       url: it.link || '',
       time: Math.floor(new Date(it.pubDate).getTime() / 1000) || 0,
@@ -100,12 +126,16 @@ async function fetchFeed(feed) {
 }
 
 /**
- * 抓取全部新闻源并过滤出与 base 品种相关的宏观新闻
+ * 抓取全部新闻源并过滤出与 base 品种相关的新闻
  * @param {string} base 品种基础货币，如 'BTC'
  * @returns {Array<{id,time,title,url,source,category,impact,note}>} 按时间降序
  */
 export async function fetchNews(base) {
-  const all = (await Promise.all(NEWS_FEEDS.map(fetchFeed))).flat();
+  const feeds = [...NEWS_FEEDS];
+  const sf = symbolSearchFeed(base);
+  if (sf) feeds.push(sf);
+
+  const all = (await Promise.all(feeds.map(fetchFeed))).flat();
   const seen = new Set();
   const out = [];
   for (const item of all) {
@@ -113,7 +143,8 @@ export async function fetchNews(base) {
     const key = item.title.slice(0, 60);
     if (seen.has(key)) continue;
     seen.add(key);
-    if (!isRelevant(item.title, base)) continue;
+    // 专项检索源(fresh)直接保留，其余按相关性过滤
+    if (!item.fresh && !isRelevant(item.title, base)) continue;
     out.push({
       id: `news_${item.time}_${key.replace(/\W+/g, '').slice(0, 16)}`,
       time: item.time,
@@ -125,5 +156,5 @@ export async function fetchNews(base) {
       note: item.source,
     });
   }
-  return out.sort((a, b) => b.time - a.time).slice(0, 40);
+  return out.sort((a, b) => b.time - a.time).slice(0, 50);
 }

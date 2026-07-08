@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=6" />
+  <link rel="stylesheet" href="css/style.css?v=7" />
   <!-- TradingView 开源图表库 lightweight-charts -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -71,9 +71,10 @@
     <aside class="sidebar">
       <nav class="tabbar">
         <button class="tab-btn active" data-tab="tabAdvice">建议</button>
-        <button class="tab-btn" data-tab="tabPm">PM 5分钟</button>
-        <button class="tab-btn" data-tab="tabNews">新闻解读</button>
-        <button class="tab-btn" data-tab="tabData">市场数据</button>
+        <button class="tab-btn" data-tab="tabBacktest">回测</button>
+        <button class="tab-btn" data-tab="tabPm">PM5m</button>
+        <button class="tab-btn" data-tab="tabNews">新闻</button>
+        <button class="tab-btn" data-tab="tabData">数据</button>
         <button class="tab-btn" data-tab="tabSerenity">Serenity</button>
       </nav>
 
@@ -89,6 +90,15 @@
         <div class="panel">
           <h3>建议复盘 <span class="h-note">预测 vs 实际 · 自动反思</span></h3>
           <div id="reviewBox" class="review-box"><div class="advisor-loading">暂无已结算的预测</div></div>
+        </div>
+      </div>
+
+      <!-- Tab: 历史回测 -->
+      <div class="tab-page" id="tabBacktest">
+        <div class="panel">
+          <h3>历史回测 <span class="h-note">过去7天 · 30m/2h/4h/12h · 同一建议逻辑</span></h3>
+          <div id="backtestBox" class="review-box"><div class="advisor-loading">点击下方按钮开始回测</div></div>
+          <button id="backtestRun" class="btn-small">运行7天回测</button>
         </div>
       </div>
 
@@ -188,6 +198,6 @@
   <div id="toastContainer" class="toast-container"></div>
   <div id="tooltip" class="tooltip hidden"></div>
 
-  <script type="module" src="js/app.js?v=6"></script>
+  <script type="module" src="js/app.js?v=7"></script>
 </body>
 </html>

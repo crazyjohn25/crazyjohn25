@@ -42,7 +42,14 @@ import {
   buildSerenityIndex,
   scorePick,
 } from './serenity.js';
-import { fetchDailyBatch, snapshotBatch } from './stocks.js';
+import {
+  fetchDailyBatch,
+  snapshotBatch,
+  fetchQuoteMeta,
+  fetchCompanyNews,
+} from './stocks.js';
+import { getCompany } from './companies.js';
+import { runBacktest } from './backtest.js';
 import { PmHistory, pmDeepStats, pmReflections } from './pmstats.js';
 
 const $ = (id) => document.getElementById(id);
@@ -1101,31 +1108,47 @@ function renderSerenity(daily, mode) {
     idxBox.innerHTML = '<div class="advisor-loading">行情不可用，无法合成指数</div>';
   }
 
-  // 组合表（按评分排序）
+  // 组合表（按评分排序）；点击行展开个股详情
   const rows = SERENITY_PICKS.map((p) => {
     const d = daily[p.ticker];
     const { score, perf30 } = scorePick(p, d ? d.candles : null);
     return { ...p, score, perf30 };
   }).sort((a, b) => b.score - a.score);
 
-  $('serenityPicksBox').innerHTML =
-    `<table class="sy-table"><thead><tr><th>标的</th><th>行业</th><th>叙事</th><th>30天</th><th>评分</th></tr></thead><tbody>` +
+  const box = $('serenityPicksBox');
+  box.innerHTML =
     rows
       .map((r) => {
         const ind = INDUSTRIES[r.industry];
         const perfCls = r.perf30 === null ? '' : r.perf30 >= 0 ? 'up' : 'down';
+        const co = getCompany(r.ticker);
         return (
-          `<tr><td><b>${escapeHtml(r.ticker)}</b>${r.disclosed ? ' ◆' : ''}</td>` +
-          `<td><span class="sy-tag" style="background:${ind.color}">${ind.label}</span></td>` +
-          `<td>${NARRATIVES[r.narrative].label}</td>` +
-          `<td class="${perfCls}">${r.perf30 === null ? '-' : (r.perf30 >= 0 ? '+' : '') + r.perf30.toFixed(1) + '%'}</td>` +
-          `<td class="sy-score">${r.score.toFixed(1)}</td></tr>` +
-          `<tr><td colspan="5" class="sy-note">${escapeHtml(r.note)}</td></tr>`
+          `<div class="sy-pick" data-ticker="${escapeHtml(r.ticker)}">` +
+          `<div class="sy-pick-head">` +
+          `<span><b>${escapeHtml(r.ticker)}</b>${r.disclosed ? ' ◆' : ''} <span class="sy-note">${escapeHtml(co.cn)}</span></span>` +
+          `<span><span class="sy-tag" style="background:${ind.color}">${ind.label}</span> ` +
+          `<span class="${perfCls}">${r.perf30 === null ? '-' : (r.perf30 >= 0 ? '+' : '') + r.perf30.toFixed(1) + '%'}</span> ` +
+          `<span class="sy-score">${r.score.toFixed(1)}</span></span>` +
+          `</div>` +
+          `<div class="sy-detail" id="syd-${escapeHtml(r.ticker)}"></div>` +
+          `</div>`
         );
       })
       .join('') +
-    `</tbody></table>` +
-    `<div class="sy-note" style="margin-top:4px">◆=本人公开披露持仓 · 评分=叙事权重×2 + 30天动量 + 披露加成（0-10）</div>`;
+    `<div class="sy-note" style="margin-top:4px">◆=本人公开披露持仓 · 评分=叙事权重×2+30天动量+披露加成 · 点击任意标的展开详情</div>`;
+
+  box.querySelectorAll('.sy-pick-head').forEach((head) => {
+    head.addEventListener('click', () => {
+      const pick = head.parentElement;
+      const ticker = pick.dataset.ticker;
+      const detail = $(`syd-${ticker}`);
+      const open = detail.classList.toggle('open');
+      if (open && !detail.dataset.loaded) {
+        detail.dataset.loaded = '1';
+        renderCompanyDetail(ticker, detail, rows.find((x) => x.ticker === ticker));
+      }
+    });
+  });
 
   // 方法论
   const pr = SERENITY_PROFILE;
@@ -1137,6 +1160,149 @@ function renderSerenity(daily, mode) {
     `<div class="rv-reflect">${escapeHtml(pr.risk)}</div>`;
 }
 
+/** 渲染单只股票详情：公司资料 + 实时行情 + 竞品 + 买入理由 + challenge + 公司新闻 */
+async function renderCompanyDetail(ticker, el, pick) {
+  const co = getCompany(ticker);
+  const nar = pick ? NARRATIVES[pick.narrative].label : '-';
+  el.innerHTML =
+    `<div class="co-name">${escapeHtml(co.name)}（${escapeHtml(co.cn)}）</div>` +
+    `<div class="co-desc">${escapeHtml(co.desc)}</div>` +
+    `<div class="co-quote" id="coq-${escapeHtml(ticker)}"><span class="sy-note">加载实时行情…</span></div>` +
+    `<table class="co-fund"><tbody>` +
+    `<tr><td>市值</td><td>${escapeHtml(co.mcap)}</td><td>市盈率PE</td><td>${escapeHtml(co.pe)}</td></tr>` +
+    `<tr><td>市净率PB</td><td>${escapeHtml(co.pb)}</td><td>叙事定位</td><td>${escapeHtml(nar)}</td></tr>` +
+    `</tbody></table>` +
+    `<div class="co-sec"><b>赛道定位与排名：</b>${escapeHtml(co.rank)}</div>` +
+    `<div class="co-sec"><b>主要竞品：</b>${co.peers.map((p) => `<span class="co-peer">${escapeHtml(p)}</span>`).join('')}</div>` +
+    `<div class="co-sec"><b>财报要点：</b>${escapeHtml(co.financials)}</div>` +
+    `<div class="interp co-bull"><b>为什么买它（我方逻辑）：</b>${escapeHtml(co.bull)}</div>` +
+    `<div class="rv-reflect co-challenge"><b>Challenge Serenity（反方质疑）：</b>${escapeHtml(co.challenge)}</div>` +
+    `<div class="co-news" id="con-${escapeHtml(ticker)}"><span class="sy-note">加载公司新闻…</span></div>`;
+
+  // 实时行情（chart meta）
+  fetchQuoteMeta(pick && pick.industry ? ticker : ticker)
+    .then((q) => {
+      const qe = $(`coq-${ticker}`);
+      if (!qe) return;
+      if (!q) {
+        qe.innerHTML = '<span class="sy-note">实时行情不可达（可能被网络限制）</span>';
+        return;
+      }
+      const range =
+        q.high52 && q.low52
+          ? ` · 52周 ${q.low52.toFixed(2)}~${q.high52.toFixed(2)}` +
+            `（距高点${(((q.price - q.high52) / q.high52) * 100).toFixed(0)}%）`
+          : '';
+      qe.innerHTML = `<span class="co-price">${q.price.toFixed(2)} ${escapeHtml(q.currency)}</span><span class="sy-note">${range}</span>`;
+    })
+    .catch(() => {});
+
+  // 公司新闻（雅虎单股 + 谷歌检索）
+  fetchCompanyNews(ticker, co.name)
+    .then((items) => {
+      const ne = $(`con-${ticker}`);
+      if (!ne) return;
+      if (!items.length) {
+        ne.innerHTML = '<span class="sy-note">暂无公司新闻或网络受限</span>';
+        return;
+      }
+      ne.innerHTML =
+        `<div class="co-news-h">最新公司新闻</div>` +
+        items
+          .slice(0, 6)
+          .map(
+            (it) =>
+              `<div class="co-news-i"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(it.title)}</a>` +
+              `<span class="sy-note"> · ${escapeHtml(it.source)} · ${formatTime(it.time)}</span></div>`
+          )
+          .join('');
+    })
+    .catch(() => {});
+}
+
+// ---------------- 历史回测 ----------------
+
+let backtestRunning = false;
+
+async function runBacktestPanel() {
+  if (backtestRunning) return;
+  backtestRunning = true;
+  const box = $('backtestBox');
+  box.innerHTML = '<div class="advisor-loading">回测中，正在拉取多周期历史K线并复现建议…</div>';
+
+  const fetchCandles = async (interval, limit) => {
+    if (state.usingMock) return generateMockHistory(interval, limit);
+    try {
+      return await fetchHistory(state.symbol, interval, limit);
+    } catch (_) {
+      return generateMockHistory(interval, limit);
+    }
+  };
+
+  let bt;
+  try {
+    bt = await runBacktest(fetchCandles);
+  } catch (_) {
+    box.innerHTML = '<div class="advisor-loading">回测失败，请重试</div>';
+    backtestRunning = false;
+    return;
+  }
+
+  const symLabel = getSymbol(state.symbol).label;
+  const pct = (x) => (x !== null ? (x * 100).toFixed(0) + '%' : 'N/A');
+
+  const table =
+    `<table class="sy-table"><thead><tr><th>周期</th><th>次数</th><th>命中率</th><th>累计收益</th><th>多/空</th></tr></thead><tbody>` +
+    bt.horizons
+      .map((h) => {
+        if (!h.total)
+          return `<tr><td>${h.label}</td><td colspan="4" class="sy-note">${h.error ? '数据不可用' : '无有效样本'}</td></tr>`;
+        const cls = h.hitRate >= 0.55 ? 'up' : h.hitRate < 0.45 ? 'down' : '';
+        const cumCls = h.cum >= 0 ? 'up' : 'down';
+        return (
+          `<tr><td><b>${h.label}</b></td><td>${h.total}</td>` +
+          `<td class="${cls}">${pct(h.hitRate)}</td>` +
+          `<td class="${cumCls}">${h.cum >= 0 ? '+' : ''}${h.cum.toFixed(1)}%</td>` +
+          `<td>${h.longs}/${h.shorts}</td></tr>`
+        );
+      })
+      .join('') +
+    `</tbody></table>`;
+
+  // 每个周期的代表性正确/错误案例（含当时理由）
+  const caseHtml = bt.horizons
+    .filter((h) => h.total)
+    .map((h) => {
+      const caseLine = (c, ok) =>
+        `<details class="pm-hist-item"><summary><span class="${ok ? 'rv-hit' : 'rv-miss'}">${ok ? '✓正确' : '✗错误'}</span> ` +
+        `${formatTime(c.time)} ${c.direction === 'up' ? '看多' : '看空'}（${c.score.toFixed(1)}分）→ ${c.changePct >= 0 ? '+' : ''}${c.changePct.toFixed(2)}%，跟随收益${c.ret >= 0 ? '+' : ''}${c.ret.toFixed(2)}%</summary>` +
+        `<ul class="reasons-list">${c.reasons.map((r) => `<li>· ${escapeHtml(r)}</li>`).join('')}</ul>` +
+        `<div class="sy-note">入场${c.entry.toFixed(2)} → 出场${c.exit.toFixed(2)}（持有至${formatTime(c.exitTime)}）</div></details>`;
+      const wins = (h.cases.wins || []).map((c) => caseLine(c, true)).join('');
+      const losses = (h.cases.losses || []).map((c) => caseLine(c, false)).join('');
+      return (
+        `<div class="bt-hgroup"><div class="bt-htitle">${h.label} 代表案例</div>` +
+        (wins || losses || '<div class="sy-note">无</div>') +
+        `</div>`
+      );
+    })
+    .join('');
+
+  const reflectHtml =
+    `<div class="rv-reflect"><b>深刻反思与改进：</b><br>` +
+    bt.reflections.map((r) => `· ${escapeHtml(r)}`).join('<br>') +
+    `</div>`;
+
+  box.innerHTML =
+    `<div class="sy-note">标的 ${escapeHtml(symLabel)} · 回测于 ${formatTime(bt.generatedAt)}${state.usingMock ? ' · 模拟数据' : ''}</div>` +
+    table +
+    reflectHtml +
+    `<div style="margin-top:6px"><b>代表案例（点击展开当时理由）</b></div>` +
+    caseHtml;
+
+  backtestRunning = false;
+}
+
 // ---------------- 侧栏Tab切换 ----------------
 
 document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -1146,8 +1312,14 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
       .querySelectorAll('.tab-page')
       .forEach((p) => p.classList.toggle('active', p.id === btn.dataset.tab));
     if (btn.dataset.tab === 'tabSerenity') refreshSerenity(); // 懒加载股票行情
+    if (btn.dataset.tab === 'tabBacktest' && !$('backtestBox').dataset.ran) {
+      $('backtestBox').dataset.ran = '1';
+      runBacktestPanel();
+    }
   });
 });
+
+$('backtestRun').addEventListener('click', runBacktestPanel);
 
 // ---------------- 真实新闻抓取 ----------------
 

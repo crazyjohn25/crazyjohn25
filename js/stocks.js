@@ -178,6 +178,68 @@ export async function fetchDailyBatch(tickers, budgetMs = 20000) {
 }
 
 /**
+ * 取单只股票的实时行情摘要（价格、52周高低、名称）
+ * 来自 chart 接口 meta，不需要鉴权
+ */
+export async function fetchQuoteMeta(ticker) {
+  const url = `${YAHOO}${encodeURIComponent(ticker)}?interval=1d&range=5d`;
+  for (const build of [(u) => u, ...PROXIES]) {
+    const data = await tryFetchJson(build(url));
+    const m = data?.chart?.result?.[0]?.meta;
+    if (m && m.regularMarketPrice != null) {
+      return {
+        price: m.regularMarketPrice,
+        high52: m.fiftyTwoWeekHigh ?? null,
+        low52: m.fiftyTwoWeekLow ?? null,
+        name: m.longName || m.shortName || ticker,
+        currency: m.currency || 'USD',
+      };
+    }
+  }
+  return null;
+}
+
+const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
+
+/**
+ * 取单只股票的公司新闻（雅虎财经单股RSS + 谷歌公司检索），合并去重，新在前
+ * @returns [{title, url, source, time}]
+ */
+export async function fetchCompanyNews(ticker, companyName) {
+  const yahoo = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(ticker)}&region=US&lang=en-US`;
+  const nameQuery = companyName ? `"${companyName}" OR ${ticker} stock` : `${ticker} stock`;
+  const google = `https://news.google.com/rss/search?q=${encodeURIComponent(nameQuery)}&hl=en-US&gl=US&ceid=US:en`;
+  const feeds = [
+    { source: 'Yahoo Finance', url: yahoo },
+    { source: 'Google News', url: google },
+  ];
+
+  const results = await Promise.all(
+    feeds.map(async (f) => {
+      const data = await tryFetchJson(RSS2JSON + encodeURIComponent(f.url), 12000);
+      if (!data || data.status !== 'ok' || !Array.isArray(data.items)) return [];
+      return data.items.map((it) => ({
+        title: it.title || '',
+        url: it.link || '',
+        source: f.source,
+        time: Math.floor(new Date(it.pubDate).getTime() / 1000) || 0,
+      }));
+    })
+  );
+
+  const seen = new Set();
+  const out = [];
+  for (const item of results.flat()) {
+    if (!item.title || !item.time) continue;
+    const key = item.title.slice(0, 50).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out.sort((a, b) => b.time - a.time).slice(0, 12);
+}
+
+/**
  * 轮询订阅股票"实时"更新（Yahoo数据延迟约15分钟）
  * @returns 取消函数
  */
