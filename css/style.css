@@ -105,6 +105,83 @@ body {
   overflow-y: auto;
 }
 
+/* 侧栏Tab */
+.tabbar {
+  display: flex;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+  padding-bottom: 2px;
+}
+.tab-btn {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px 6px 0 0;
+  padding: 7px 2px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.tab-page { display: none; flex-direction: column; gap: 10px; }
+.tab-page.active { display: flex; }
+
+/* 新闻解读徽章 */
+.bias {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 5px;
+}
+.bias.bullish { background: rgba(38,166,154,.2); color: var(--buy); }
+.bias.bearish { background: rgba(239,83,80,.2); color: var(--sell); }
+.bias.neutral { background: rgba(124,135,155,.2); color: var(--muted); }
+.interp {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: rgba(38,48,67,.35);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.interp b { color: var(--text); }
+.event-list details summary { cursor: pointer; list-style: none; }
+.event-list details summary::-webkit-details-marker { display: none; }
+
+/* Serenity */
+.sy-idx { font-size: 22px; font-weight: 700; }
+.sy-idx.up { color: var(--buy); }
+.sy-idx.down { color: var(--sell); }
+.sy-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sy-table th, .sy-table td { text-align: right; padding: 3px 4px; border-bottom: 1px solid var(--border); }
+.sy-table th:first-child, .sy-table td:first-child { text-align: left; }
+.sy-table th { color: var(--muted); font-weight: 400; }
+.sy-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: #fff;
+}
+.sy-score { font-weight: 700; color: #e6b800; }
+.sy-note { color: var(--muted); font-size: 11px; }
+
+/* PM统计 */
+.pm-hist-item { border-bottom: 1px solid var(--border); padding: 5px 0; }
+.pm-hist-item summary { cursor: pointer; }
+.pm-hist-item .reasons-list { color: var(--muted); padding-left: 14px; margin: 4px 0; }
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

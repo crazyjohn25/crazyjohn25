@@ -5,6 +5,8 @@
  * 网络不可用时自动降级为本地生成的模拟行情，便于离线演示。
  */
 
+import { fetchStockHistory, subscribeStockPolling } from './stocks.js';
+
 const BINANCE_REST = 'https://api.binance.com/api/v3/klines';
 const BINANCE_WS = 'wss://stream.binance.com:9443/ws';
 const HL_REST = 'https://api.hyperliquid.xyz/info';
@@ -17,7 +19,11 @@ export const SYMBOLS = [
   { id: 'SOLUSDT', label: 'SOL/USDT', source: 'binance', base: 'SOL', whaleUsd: 200000 },
   { id: 'BNBUSDT', label: 'BNB/USDT', source: 'binance', base: 'BNB', whaleUsd: 200000 },
   { id: 'HYPE', label: 'HYPE/USDC (Hyperliquid)', source: 'hyperliquid', base: 'HYPE', whaleUsd: 100000 },
+  { id: 'NDX', label: '纳斯达克100 (NDX)', source: 'stock', base: 'NDX', whaleUsd: Infinity, yahoo: '^NDX' },
 ];
+
+/** 最近一次股票行情的来源：live=实时接口 / snapshot=内置快照 */
+export let lastStockSource = null;
 
 export function getSymbol(id) {
   return SYMBOLS.find((s) => s.id === id) || SYMBOLS[0];
@@ -251,6 +257,11 @@ function subscribeHlWhales(coin, minUsd, onTrade) {
 export async function fetchHistory(symbolId, interval, limit = 500) {
   const sym = getSymbol(symbolId);
   if (sym.source === 'hyperliquid') return fetchHlHistory(sym.id, interval, limit);
+  if (sym.source === 'stock') {
+    const { candles, source } = await fetchStockHistory(sym.yahoo, interval, limit);
+    lastStockSource = source;
+    return candles;
+  }
   return fetchBinanceHistory(sym.id, interval, limit);
 }
 
@@ -258,11 +269,13 @@ export function subscribeKline(symbolId, interval, onBar, onError) {
   const sym = getSymbol(symbolId);
   if (sym.source === 'hyperliquid')
     return subscribeHlKline(sym.id, interval, onBar, onError);
+  if (sym.source === 'stock') return subscribeStockPolling(sym.yahoo, interval, onBar);
   return subscribeBinanceKline(sym.id, interval, onBar, onError);
 }
 
 export function subscribeWhaleTrades(symbolId, onTrade) {
   const sym = getSymbol(symbolId);
+  if (sym.source === 'stock') return () => {}; // 股票无逐笔公开流
   if (sym.source === 'hyperliquid')
     return subscribeHlWhales(sym.id, sym.whaleUsd, onTrade);
   return subscribeBinanceWhales(sym.id, sym.whaleUsd, onTrade);

@@ -33,6 +33,18 @@ import {
   advise5m,
 } from './polymarket.js';
 import { ReviewLog, adaptWeights } from './review.js';
+import { interpret } from './interpret.js';
+import {
+  SERENITY_PICKS,
+  INDUSTRIES,
+  NARRATIVES,
+  SERENITY_PROFILE,
+  buildSerenityIndex,
+  scorePick,
+} from './serenity.js';
+import { fetchDailyBatch } from './stocks.js';
+import { PmHistory, pmDeepStats, pmReflections } from './pmstats.js';
+import { lastStockSource } from './datafeed.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -62,6 +74,7 @@ const state = {
 const alerts = new AlertManager({ onAlert: showToast });
 const whaleFeed = new WhaleFeed(30);
 const reviewLog = new ReviewLog();
+const pmHistory = new PmHistory();
 
 /** Polymarket 5m 状态（仅BTC品种启用） */
 const pm = {
@@ -77,13 +90,31 @@ const pm = {
 
 // ---------------- 图表初始化 ----------------
 
+/** 图表坐标轴时间统一显示为 UTC+8 */
+function chartTickUTC8(t, tickType) {
+  const d = new Date((t + 8 * 3600) * 1000);
+  const pad = (x) => String(x).padStart(2, '0');
+  if (tickType === 0) return String(d.getUTCFullYear()); // 年
+  if (tickType === 1 || tickType === 2)
+    return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`; // 月/日
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`; // 日内
+}
+
 const chartOpts = {
   layout: { background: { color: 'transparent' }, textColor: '#d7dde8' },
   grid: {
     vertLines: { color: 'rgba(38,48,67,.5)' },
     horzLines: { color: 'rgba(38,48,67,.5)' },
   },
-  timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#263043' },
+  timeScale: {
+    timeVisible: true,
+    secondsVisible: false,
+    borderColor: '#263043',
+    tickMarkFormatter: chartTickUTC8,
+  },
+  localization: {
+    timeFormatter: (t) => `${formatTime(t)} (UTC+8)`,
+  },
   rightPriceScale: { borderColor: '#263043' },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   autoSize: true,
@@ -531,7 +562,7 @@ function renderVolumePanel() {
   const maxVol = Math.max(...rows.map((r) => r.volume));
   tbody.innerHTML = rows
     .map((r) => {
-      const d = new Date(r.time * 1000);
+      const d = new Date((r.time + 8 * 3600) * 1000); // UTC+8 显示
       const hh = String(d.getUTCHours()).padStart(2, '0');
       const pctCell = (v) =>
         v === null
@@ -665,10 +696,11 @@ mainChart.subscribeCrosshairMove((param) => {
 
 // ---------------- 侧栏渲染 ----------------
 
+/** 全站统一 UTC+8（北京时间）显示 */
 function formatTime(t) {
-  const d = new Date(t * 1000);
+  const d = new Date((t + 8 * 3600) * 1000);
   const pad = (x) => String(x).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 function escapeHtml(s) {
@@ -697,35 +729,56 @@ function renderSignalList() {
   setHtmlIfChanged(ul, html);
 }
 
-function renderEventList() {
-  const ul = $('eventList');
-  const events = listEvents().slice(0, 30);
-  const html = events
-    .map((e) => {
-      const cat = EVENT_CATEGORIES[e.category];
-      const del = e.id.startsWith('c')
-        ? `<button class="del" data-id="${e.id}" title="删除">✕</button>`
-        : '';
-      const src = e.source ? `<span class="src-tag">${escapeHtml(e.source)}</span>` : '';
-      const title = e.url
-        ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.title)}</a>`
-        : escapeHtml(e.title);
-      return (
-        `<li>${del}<span class="cat" style="background:${cat.color}">${cat.label}</span>${src}` +
-        `${title}<br><span class="time">${formatTime(e.time)}</span>` +
-        (e.note && !e.source ? `<br><span class="note">${escapeHtml(e.note)}</span>` : '') +
-        `</li>`
-      );
-    })
-    .join('');
-  if (!setHtmlIfChanged(ul, html)) return;
-  ul.querySelectorAll('.del').forEach((btn) =>
-    btn.addEventListener('click', () => {
-      removeCustomEvent(btn.dataset.id);
-      renderMarkers();
-      renderEventList();
-    })
+function eventItemHtml(e) {
+  const cat = EVENT_CATEGORIES[e.category];
+  const del = e.id.startsWith('c')
+    ? `<button class="del" data-id="${e.id}" title="删除">✕</button>`
+    : '';
+  const src = e.source ? `<span class="src-tag">${escapeHtml(e.source)}</span>` : '';
+  const title = e.url
+    ? `<a href="${escapeHtml(e.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.title)}</a>`
+    : escapeHtml(e.title);
+  const it = interpret(e.title);
+  return (
+    `<li>${del}<details><summary>` +
+    `<span class="bias ${it.bias}">${it.biasLabel}</span>` +
+    `<span class="cat" style="background:${cat.color}">${cat.label}</span>${src}` +
+    `${title}<br><span class="time">${formatTime(e.time)}</span></summary>` +
+    `<div class="interp">` +
+    `<b>影响对象：</b>${escapeHtml(it.target)}<br>` +
+    `<b>${it.biasLabel}逻辑：</b>${escapeHtml(it.reason)}<br>` +
+    `<b>需规避的风险：</b>${escapeHtml(it.risk)}` +
+    `</div></details>` +
+    (e.note && !e.source ? `<span class="note">${escapeHtml(e.note)}</span>` : '') +
+    `</li>`
   );
+}
+
+function renderEventList() {
+  const events = listEvents().slice(0, 60);
+  const macro = [];
+  const micro = [];
+  for (const e of events) {
+    (interpret(e.title).scope === 'macro' ? macro : micro).push(e);
+  }
+
+  for (const [ul, items, empty] of [
+    [$('macroList'), macro.slice(0, 20), '暂无宏观信息'],
+    [$('microList'), micro.slice(0, 20), '暂无微观信息'],
+  ]) {
+    const html = items.length
+      ? items.map(eventItemHtml).join('')
+      : `<li class="reasons">${empty}</li>`;
+    if (!setHtmlIfChanged(ul, html)) continue;
+    ul.querySelectorAll('.del').forEach((btn) =>
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        removeCustomEvent(btn.dataset.id);
+        renderMarkers();
+        renderEventList();
+      })
+    );
+  }
 }
 
 function showToast({ signal, title, body }) {
@@ -763,10 +816,14 @@ async function refreshPolymarket() {
   const panel = $('pmPanel');
   if (!pmActive()) {
     panel.style.display = 'none';
+    $('pmUnavailable').style.display = '';
     removeStrikeLine();
+    settlePmHistory();
+    renderPmStats();
     return;
   }
   panel.style.display = '';
+  $('pmUnavailable').style.display = 'none';
 
   const winStart = currentWindowStart();
   try {
@@ -823,11 +880,104 @@ async function refreshPolymarket() {
       });
     }
 
+    // 5分钟历史快照：每窗口登记完整推理依据（含观望，供回滚查看）
+    if (pm.strike && pm.candles1m.length) {
+      const cur = pm.candles1m[pm.candles1m.length - 1].close;
+      pmHistory.record({
+        winStart,
+        winEnd: pm.window.endSec,
+        action: pm.advice.action,
+        edge: pm.advice.edge,
+        techProb: pm.advice.techProb,
+        strike: pm.strike,
+        priceAtCall: cur,
+        secondsLeftAtCall: secondsLeft,
+        leadPct: ((cur - pm.strike) / pm.strike) * 100,
+        flowBias:
+          pm.flow && pm.flow.upFlow + pm.flow.downFlow > 0
+            ? pm.flow.netUpFlow / (pm.flow.upFlow + pm.flow.downFlow)
+            : null,
+        bookImbalance: pm.bookInfo ? pm.bookInfo.imbalance : null,
+        upPrice: pm.window.upPrice,
+        reasons: pm.advice.reasons,
+      });
+    }
+    settlePmHistory();
+
     renderPmPanel(secondsLeft);
+    renderPmStats();
     updateStrikeLine();
   } catch (_) {
     setHtmlIfChanged($('pmBox'), '<div class="advisor-loading">Polymarket数据获取失败，将自动重试</div>');
   }
+}
+
+/** 结算5分钟历史：用1分钟K线还原窗口结束价 */
+function settlePmHistory() {
+  if (!pm.candles1m.length) return;
+  pmHistory.settle((timeSec) => {
+    // 窗口结束价 = 覆盖该时刻的1分钟K线收盘价
+    for (let i = pm.candles1m.length - 1; i >= 0; i--) {
+      const c = pm.candles1m[i];
+      if (c.time <= timeSec - 60) return c.close; // 结束前最后一根完整1m线
+    }
+    return null;
+  });
+}
+
+function renderPmStats() {
+  const box = $('pmStatsBox');
+  const stats = pmDeepStats(pmHistory.records);
+  if (!stats) {
+    setHtmlIfChanged(
+      box,
+      `<div class="advisor-loading">暂无已结算的方向预测${pmHistory.pendingCount() ? `（${pmHistory.pendingCount()}期待结算）` : ''}</div>`
+    );
+    return;
+  }
+  const pct = (x) => (x * 100).toFixed(0) + '%';
+
+  const bucketRows = (title, buckets) =>
+    `<div class="rv-stat"><span><b>${title}</b></span><span></span></div>` +
+    Object.entries(buckets)
+      .map(([k, b]) => {
+        const rate = b.hits / b.total;
+        const cls = rate >= 0.55 ? 'good' : rate < 0.45 ? 'bad' : '';
+        return `<div class="rv-stat"><span>${escapeHtml(k)}</span><span class="rv-rate ${cls}">${b.hits}/${b.total} · ${pct(rate)}</span></div>`;
+      })
+      .join('');
+
+  const reflectHtml = `<div class="rv-reflect">${pmReflections(stats).map(escapeHtml).join('<br>')}</div>`;
+
+  const histHtml = pmHistory
+    .settledCalls(12)
+    .map((r) => {
+      const cls = r.hit ? 'rv-hit' : 'rv-miss';
+      const missNote = r.missCause
+        ? `<div class="interp"><b>错误归因：${escapeHtml(r.missCause.label)}</b><br>${escapeHtml(r.missCause.detail)}</div>`
+        : '';
+      return (
+        `<details class="pm-hist-item"><summary><span class="${cls}">${r.hit ? '✓' : '✗'}</span> ` +
+        `${formatTime(r.winStart)} ${escapeHtml(r.action)}（edge ${(r.edge * 100).toFixed(1)}分）→ 实际${r.outcome === 'up' ? '涨' : '跌'}</summary>` +
+        `<ul class="reasons-list">${(r.reasons || []).map((x) => `<li>· ${escapeHtml(x)}</li>`).join('')}</ul>` +
+        `<div class="sy-note">目标价${r.strike.toFixed(1)} · 下单价${r.priceAtCall.toFixed(1)} · 结束价${r.endPrice ? r.endPrice.toFixed(1) : '-'}</div>` +
+        missNote +
+        `</details>`
+      );
+    })
+    .join('');
+
+  setHtmlIfChanged(
+    box,
+    `<div class="rv-stat"><span>累计方向预测</span><span>${stats.total}次</span></div>` +
+      `<div class="rv-stat"><span>命中率</span><span class="rv-rate ${stats.hitRate >= 0.55 ? 'good' : stats.hitRate < 0.45 ? 'bad' : ''}">${pct(stats.hitRate)}</span></div>` +
+      `<div class="rv-stat"><span>理论盈亏（1单位/次）</span><span class="rv-rate ${stats.pnl >= 0 ? 'good' : 'bad'}">${stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}</span></div>` +
+      bucketRows('按剩余时间', stats.timeBuckets) +
+      bucketRows('按edge区间', stats.edgeBuckets) +
+      reflectHtml +
+      `<div style="margin-top:6px"><b>历史回滚（点击展开当期推理）</b></div>` +
+      histHtml
+  );
 }
 
 function renderPmPanel(secondsLeft) {
@@ -901,6 +1051,89 @@ setInterval(() => {
   const secondsLeft = Math.max(0, pm.window.endSec - Math.floor(Date.now() / 1000));
   $('pmCountdown').textContent = `剩余 ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`;
 }, 1000);
+
+// ---------------- Serenity 指数与推荐组合 ----------------
+
+let serenityLoaded = false;
+
+async function refreshSerenity() {
+  if (serenityLoaded) return;
+  serenityLoaded = true;
+
+  const tickers = [...new Set(SERENITY_PICKS.map((p) => p.ticker))];
+  let daily = {};
+  try {
+    daily = await fetchDailyBatch(tickers);
+  } catch (_) {
+    /* 全部失败时 daily 为空，下面各自降级 */
+  }
+
+  // 指数
+  const idx = buildSerenityIndex(daily);
+  const idxBox = $('serenityIndexBox');
+  if (idx) {
+    const cls = idx.changePct >= 0 ? 'up' : 'down';
+    const spark = idx.series
+      .map((p, i) => (i % Math.ceil(idx.series.length / 20) === 0 ? p.value.toFixed(1) : null))
+      .filter(Boolean)
+      .join(' → ');
+    idxBox.innerHTML =
+      `<span class="sy-idx ${cls}">${idx.current.toFixed(2)}</span> ` +
+      `<span class="rv-rate ${cls === 'up' ? 'good' : 'bad'}">${idx.changePct >= 0 ? '+' : ''}${idx.changePct.toFixed(2)}% / 30天</span>` +
+      `<div class="sy-note">覆盖${idx.covered}/${idx.total}只成分 · 等权重 · 基期=100` +
+      `${lastStockSource === 'snapshot' ? ' · 快照数据（实时源不可达）' : ''}</div>` +
+      `<div class="sy-note">走势：${spark}</div>`;
+  } else {
+    idxBox.innerHTML = '<div class="advisor-loading">行情不可用，无法合成指数</div>';
+  }
+
+  // 组合表（按评分排序）
+  const rows = SERENITY_PICKS.map((p) => {
+    const d = daily[p.ticker];
+    const { score, perf30 } = scorePick(p, d ? d.candles : null);
+    return { ...p, score, perf30 };
+  }).sort((a, b) => b.score - a.score);
+
+  $('serenityPicksBox').innerHTML =
+    `<table class="sy-table"><thead><tr><th>标的</th><th>行业</th><th>叙事</th><th>30天</th><th>评分</th></tr></thead><tbody>` +
+    rows
+      .map((r) => {
+        const ind = INDUSTRIES[r.industry];
+        const perfCls = r.perf30 === null ? '' : r.perf30 >= 0 ? 'up' : 'down';
+        return (
+          `<tr><td><b>${escapeHtml(r.ticker)}</b>${r.disclosed ? ' ◆' : ''}</td>` +
+          `<td><span class="sy-tag" style="background:${ind.color}">${ind.label}</span></td>` +
+          `<td>${NARRATIVES[r.narrative].label}</td>` +
+          `<td class="${perfCls}">${r.perf30 === null ? '-' : (r.perf30 >= 0 ? '+' : '') + r.perf30.toFixed(1) + '%'}</td>` +
+          `<td class="sy-score">${r.score.toFixed(1)}</td></tr>` +
+          `<tr><td colspan="5" class="sy-note">${escapeHtml(r.note)}</td></tr>`
+        );
+      })
+      .join('') +
+    `</tbody></table>` +
+    `<div class="sy-note" style="margin-top:4px">◆=本人公开披露持仓 · 评分=叙事权重×2 + 30天动量 + 披露加成（0-10）</div>`;
+
+  // 方法论
+  const pr = SERENITY_PROFILE;
+  $('serenityProfileBox').innerHTML =
+    `<div class="rv-stat"><span>账号</span><span><a href="${pr.url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${pr.handle}</a>（${pr.followers}粉丝）</span></div>` +
+    `<div class="rv-stat"><span>风格</span><span>${escapeHtml(pr.style)}</span></div>` +
+    `<div class="interp"><b>核心框架：</b>${escapeHtml(pr.framework)}</div>` +
+    `<div class="interp"><b>代表战绩：</b>${escapeHtml(pr.record)}</div>` +
+    `<div class="rv-reflect">${escapeHtml(pr.risk)}</div>`;
+}
+
+// ---------------- 侧栏Tab切换 ----------------
+
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    document
+      .querySelectorAll('.tab-page')
+      .forEach((p) => p.classList.toggle('active', p.id === btn.dataset.tab));
+    if (btn.dataset.tab === 'tabSerenity') refreshSerenity(); // 懒加载股票行情
+  });
+});
 
 // ---------------- 真实新闻抓取 ----------------
 

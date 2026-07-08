@@ -13,20 +13,30 @@ const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
 export const NEWS_FEEDS = [
   { source: 'The Block', url: 'https://www.theblock.co/rss.xml' },
   { source: 'CoinDesk', url: 'https://www.coindesk.com/arc/outboundfeeds/rss' },
-  { source: '吴说区块链', url: 'https://wublock.substack.com/feed' },
+  { source: '吴说区块链', url: 'https://www.wublock123.com/feed' },
+  { source: '吴说(EN)', url: 'https://wublock.substack.com/feed' },
+  {
+    source: 'Foresight News',
+    url: 'https://news.google.com/rss/search?q=site:foresightnews.pro&hl=zh-CN&gl=CN&ceid=CN:zh-Hans',
+  },
   {
     source: 'AP News',
     url: 'https://news.google.com/rss/search?q=site:apnews.com%20(federal%20reserve%20OR%20bitcoin%20OR%20crypto%20OR%20oil%20prices)&hl=en-US&gl=US&ceid=US:en',
+  },
+  {
+    source: 'MicroStrategy追踪',
+    url: 'https://news.google.com/rss/search?q=microstrategy%20OR%20%22michael%20saylor%22%20bitcoin&hl=en-US&gl=US&ceid=US:en',
   },
 ];
 
 /** 品种相关关键词（标题命中即认为与交易对相关） */
 const SYMBOL_KEYWORDS = {
-  BTC: ['bitcoin', 'btc', '比特币'],
+  BTC: ['bitcoin', 'btc', '比特币', 'microstrategy', 'saylor', '微策略'],
   ETH: ['ethereum', 'eth', 'ether', '以太坊'],
   SOL: ['solana', 'sol'],
   BNB: ['bnb', 'binance coin'],
   HYPE: ['hyperliquid', 'hype'],
+  NDX: ['nasdaq', 'nvidia', 'nvda', 'apple', 'microsoft', 'tech stocks', '纳指', '纳斯达克', 'ai stocks', 'chip', 'semiconductor', '英伟达', '芯片', '半导体'],
 };
 
 /** 宏观关键词 -> 分类 */
@@ -42,6 +52,7 @@ const HIGH_IMPACT_WORDS = [
   'fed', 'fomc', 'rate cut', 'rate hike', 'etf approv', 'hack', 'exploit',
   'crash', 'plunge', 'surge', 'all-time high', 'liquidat', 'bankrupt', 'sec sues',
   'war', 'strike', 'sanction', '美联储', '加息', '降息', '暴跌', '暴涨', '清算', '黑客',
+  'microstrategy', 'saylor', '微策略', 'nonfarm', '非农', 'cpi', '通胀',
 ];
 
 function classify(text) {
