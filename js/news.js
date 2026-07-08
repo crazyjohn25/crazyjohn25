@@ -28,11 +28,20 @@ export const NEWS_FEEDS = [
     url: 'https://news.google.com/rss/search?q=microstrategy%20OR%20%22michael%20saylor%22%20bitcoin&hl=en-US&gl=US&ceid=US:en',
   },
   { source: 'Yahoo加密', url: 'https://finance.yahoo.com/news/rssindex' },
+  { source: 'CoinTelegraph', url: 'https://cointelegraph.com/rss' },
+  { source: 'Decrypt', url: 'https://decrypt.co/feed' },
   {
     source: 'Google加密快讯',
-    url: 'https://news.google.com/rss/search?q=(crypto%20OR%20bitcoin%20OR%20ethereum)%20when:2d&hl=en-US&gl=US&ceid=US:en',
+    url: 'https://news.google.com/rss/search?q=(crypto%20OR%20bitcoin%20OR%20ethereum)%20when:1d&hl=en-US&gl=US&ceid=US:en',
+  },
+  {
+    source: 'Google宏观快讯',
+    url: 'https://news.google.com/rss/search?q=(federal%20reserve%20OR%20cpi%20OR%20nonfarm%20OR%20oil%20price)%20when:1d&hl=en-US&gl=US&ceid=US:en',
   },
 ];
+
+/** 新闻时效上限：超过该秒数的旧闻直接丢弃（自定义/内置事件不受影响） */
+export const NEWS_MAX_AGE_SEC = 3 * 86400;
 
 /** 按当前品种动态生成的"最新微观新闻"检索源（更聚焦、更新快） */
 const SYMBOL_SEARCH = {
@@ -138,8 +147,10 @@ export async function fetchNews(base) {
   const all = (await Promise.all(feeds.map(fetchFeed))).flat();
   const seen = new Set();
   const out = [];
+  const minTime = Math.floor(Date.now() / 1000) - NEWS_MAX_AGE_SEC;
   for (const item of all) {
     if (!item.time || !item.title) continue;
+    if (item.time < minTime) continue; // 丢弃3天以上旧闻，确保时效
     const key = item.title.slice(0, 60);
     if (seen.has(key)) continue;
     seen.add(key);

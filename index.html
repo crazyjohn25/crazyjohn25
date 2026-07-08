@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=7" />
+  <link rel="stylesheet" href="css/style.css?v=8" />
   <!-- TradingView 开源图表库 lightweight-charts -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -184,6 +184,14 @@
           <div id="serenityIndexBox" class="review-box"><div class="advisor-loading">加载行情中…</div></div>
         </div>
         <div class="panel">
+          <h3>行业子指数 <span class="h-note">激光/封装/光模块/存储等 · 30天</span></h3>
+          <div id="serenitySubBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+        </div>
+        <div class="panel">
+          <h3>组合动态监控 <span class="h-note">重点标的近2天新闻 · 10分钟自动刷新</span></h3>
+          <div id="serenityFeedBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+        </div>
+        <div class="panel">
           <h3>推荐组合 <span class="h-note">行业 · 叙事 · 自动评分</span></h3>
           <div id="serenityPicksBox" class="review-box"></div>
         </div>
@@ -198,6 +206,6 @@
   <div id="toastContainer" class="toast-container"></div>
   <div id="tooltip" class="tooltip hidden"></div>
 
-  <script type="module" src="js/app.js?v=7"></script>
+  <script type="module" src="js/app.js?v=8"></script>
 </body>
 </html>

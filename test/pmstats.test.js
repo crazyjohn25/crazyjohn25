@@ -62,6 +62,19 @@ test('classifyMiss 归因：资金流误导', () => {
   assert.equal(cause.code, 'flow_trap');
 });
 
+test('settle 计算ROI：命中=(1-成本)/成本，未中=-100%', () => {
+  const h = new PmHistory({});
+  h.record(rec({ winStart: 1000, winEnd: 1300, action: '买Up', strike: 100, upPrice: 0.5, cost: 0.5 }));
+  h.record(rec({ winStart: 2000, winEnd: 2300, action: '买Down', strike: 100, upPrice: 0.4, cost: 0.6 }));
+  h.settle((t) => (t === 1300 ? 101 : 101), 99999); // 第一期涨(买Up中)，第二期涨(买Down错)
+  const [a, b] = h.records;
+  assert.ok(Math.abs(a.roiPct - 100) < 1e-9, '50¢命中ROI应为+100%');
+  assert.equal(b.roiPct, -100);
+  const s = pmDeepStats(h.records);
+  assert.ok(Math.abs(s.cumRoiPct - 0) < 1e-9);
+  assert.ok(Math.abs(s.avgCost - 0.55) < 1e-9);
+});
+
 test('pmDeepStats 统计与理论盈亏', () => {
   const h = new PmHistory({});
   // 3胜1负，upPrice=0.5：胜+0.5×3，负-0.5 → +1.0

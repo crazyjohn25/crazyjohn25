@@ -77,6 +77,17 @@ export class PmHistory {
       if (r.action === '买Up' || r.action === '买Down') {
         const predicted = r.action === '买Up' ? 'up' : 'down';
         r.hit = predicted === r.outcome;
+        // ROI核算：成本=下单方向的价格，命中赢(1-成本)，未中损失全部成本
+        const cost =
+          r.cost !== undefined && r.cost !== null
+            ? r.cost
+            : r.upPrice !== null && r.upPrice !== undefined
+              ? predicted === 'up' ? r.upPrice : 1 - r.upPrice
+              : null;
+        if (cost !== null && cost > 0) {
+          r.cost = cost;
+          r.roiPct = r.hit ? ((1 - cost) / cost) * 100 : -100;
+        }
         if (!r.hit) r.missCause = classifyMiss(r);
       }
       settled.push(r);
@@ -167,6 +178,7 @@ export function pmDeepStats(records) {
   }
 
   const avg = (arr, f) => (arr.length ? arr.reduce((s, x) => s + f(x), 0) / arr.length : null);
+  const withRoi = calls.filter((r) => typeof r.roiPct === 'number');
 
   return {
     total: calls.length,
@@ -177,7 +189,11 @@ export function pmDeepStats(records) {
     edgeBuckets,
     timeBuckets,
     missCauses,
-    // 理论盈亏：按1单位计，买价=隐含概率，赢得1
+    // ROI统计：每期投入1单位成本的收益率
+    avgRoiPct: avg(withRoi, (r) => r.roiPct),
+    cumRoiPct: withRoi.reduce((s, r) => s + r.roiPct, 0),
+    avgCost: avg(withRoi, (r) => r.cost),
+    // 理论盈亏：按1份合约计，买价=成本，赢得1
     pnl: calls.reduce((s, r) => {
       const cost = r.action === '买Up' ? r.upPrice : 1 - r.upPrice;
       if (cost === null || cost === undefined) return s;
@@ -195,7 +211,10 @@ export function pmReflections(stats) {
   const pct = (x) => (x * 100).toFixed(0) + '%';
 
   out.push(
-    `累计${stats.total}次方向预测，命中${stats.hits}次（${pct(stats.hitRate)}），理论盈亏${stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}单位`
+    `累计${stats.total}次方向预测，命中${stats.hits}次（${pct(stats.hitRate)}），理论盈亏${stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}单位` +
+      (typeof stats.avgRoiPct === 'number'
+        ? `；平均每期ROI ${stats.avgRoiPct >= 0 ? '+' : ''}${stats.avgRoiPct.toFixed(0)}%，累计ROI ${stats.cumRoiPct >= 0 ? '+' : ''}${stats.cumRoiPct.toFixed(0)}%（每期投入1单位成本）`
+        : '')
   );
 
   for (const [k, b] of Object.entries(stats.timeBuckets)) {

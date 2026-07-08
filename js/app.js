@@ -39,7 +39,10 @@ import {
   INDUSTRIES,
   NARRATIVES,
   SERENITY_PROFILE,
+  SERENITY_DATA_UPDATED,
   buildSerenityIndex,
+  buildSubIndices,
+  fetchSerenityFeed,
   scorePick,
 } from './serenity.js';
 import {
@@ -281,6 +284,20 @@ function recomputeAndRender({ fitContent }) {
   state.indicators = computeAll(candles);
   state.signals = generateSignals(candles, state.indicators);
   state.anomalies = detectCandleAnomalies(candles);
+
+  // 风险信号提示音：只对最近一根已收盘K线上的新异动报警
+  if (!state.usingMock && state.anomalies.length && candles.length >= 2) {
+    const lastClosed = candles[candles.length - 2].time;
+    for (const a of state.anomalies) {
+      if (a.time !== lastClosed) continue;
+      alerts.fireRisk({
+        key: `anomaly|${state.symbol}|${a.time}|${a.type}`,
+        title: `${getSymbol(state.symbol).label} 风险信号`,
+        body: a.desc,
+        kind: 'risk',
+      });
+    }
+  }
 
   candleSeries.setData(candles);
   volumeSeries.setData(
@@ -886,6 +903,16 @@ async function refreshPolymarket() {
       });
     }
 
+    // 方向信号提示音（每窗口一次）
+    if (pm.advice.action === '买Up' || pm.advice.action === '买Down') {
+      alerts.fireRisk({
+        key: `pmcall|${winStart}|${pm.advice.action}`,
+        title: `Polymarket 5分钟信号：${pm.advice.action}`,
+        body: `置信度${(pm.advice.conf * 100).toFixed(0)}% · 成本${pm.advice.cost !== null ? (pm.advice.cost * 100).toFixed(0) + '¢' : '-'} · 期望ROI ${pm.advice.evRoiPct !== null ? (pm.advice.evRoiPct >= 0 ? '+' : '') + pm.advice.evRoiPct.toFixed(0) + '%' : '-'}`,
+        kind: pm.advice.action === '买Up' ? 'buy' : 'sell',
+      });
+    }
+
     // 5分钟历史快照：每窗口登记完整推理依据（含观望，供回滚查看）
     if (pm.strike && pm.candles1m.length) {
       const cur = pm.candles1m[pm.candles1m.length - 1].close;
@@ -895,6 +922,9 @@ async function refreshPolymarket() {
         action: pm.advice.action,
         edge: pm.advice.edge,
         techProb: pm.advice.techProb,
+        cost: pm.advice.cost,
+        potentialRoiPct: pm.advice.potentialRoiPct,
+        evRoiPct: pm.advice.evRoiPct,
         strike: pm.strike,
         priceAtCall: cur,
         secondsLeftAtCall: secondsLeft,
@@ -962,9 +992,13 @@ function renderPmStats() {
       const missNote = r.missCause
         ? `<div class="interp"><b>错误归因：${escapeHtml(r.missCause.label)}</b><br>${escapeHtml(r.missCause.detail)}</div>`
         : '';
+      const roiTag =
+        typeof r.roiPct === 'number'
+          ? `，ROI ${r.roiPct >= 0 ? '+' : ''}${r.roiPct.toFixed(0)}%（成本${(r.cost * 100).toFixed(0)}¢）`
+          : '';
       return (
         `<details class="pm-hist-item"><summary><span class="${cls}">${r.hit ? '✓' : '✗'}</span> ` +
-        `${formatTime(r.winStart)} ${escapeHtml(r.action)}（edge ${(r.edge * 100).toFixed(1)}分）→ 实际${r.outcome === 'up' ? '涨' : '跌'}</summary>` +
+        `${formatTime(r.winStart)} ${escapeHtml(r.action)} → 实际${r.outcome === 'up' ? '涨' : '跌'}${roiTag}</summary>` +
         `<ul class="reasons-list">${(r.reasons || []).map((x) => `<li>· ${escapeHtml(x)}</li>`).join('')}</ul>` +
         `<div class="sy-note">目标价${r.strike.toFixed(1)} · 下单价${r.priceAtCall.toFixed(1)} · 结束价${r.endPrice ? r.endPrice.toFixed(1) : '-'}</div>` +
         missNote +
@@ -973,10 +1007,18 @@ function renderPmStats() {
     })
     .join('');
 
+  const roiRow =
+    typeof stats.avgRoiPct === 'number'
+      ? `<div class="rv-stat"><span>平均ROI/期</span><span class="rv-rate ${stats.avgRoiPct >= 0 ? 'good' : 'bad'}">${stats.avgRoiPct >= 0 ? '+' : ''}${stats.avgRoiPct.toFixed(0)}%</span></div>` +
+        `<div class="rv-stat"><span>累计ROI（1单位/期）</span><span class="rv-rate ${stats.cumRoiPct >= 0 ? 'good' : 'bad'}">${stats.cumRoiPct >= 0 ? '+' : ''}${stats.cumRoiPct.toFixed(0)}%</span></div>` +
+        `<div class="rv-stat"><span>平均买入成本</span><span>${(stats.avgCost * 100).toFixed(0)}¢</span></div>`
+      : '';
+
   setHtmlIfChanged(
     box,
     `<div class="rv-stat"><span>累计方向预测</span><span>${stats.total}次</span></div>` +
       `<div class="rv-stat"><span>命中率</span><span class="rv-rate ${stats.hitRate >= 0.55 ? 'good' : stats.hitRate < 0.45 ? 'bad' : ''}">${pct(stats.hitRate)}</span></div>` +
+      roiRow +
       `<div class="rv-stat"><span>理论盈亏（1单位/次）</span><span class="rv-rate ${stats.pnl >= 0 ? 'good' : 'bad'}">${stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}</span></div>` +
       bucketRows('按剩余时间', stats.timeBuckets) +
       bucketRows('按edge区间', stats.edgeBuckets) +
@@ -1022,7 +1064,11 @@ function renderPmPanel(secondsLeft) {
         ? `<div class="pm-strike">🎯 目标价 ${pm.strike.toFixed(1)}（已画到K线图，币安1m开盘价近似Chainlink）</div>`
         : `<div class="pm-strike">目标价待窗口起始K线生成…</div>`) +
       `<span class="pm-action ${actionCls}">${escapeHtml(a.action)}</span>` +
-      (a.edge ? `<span class="upd"> 期望优势 ${(a.edge * 100).toFixed(1)}分</span>` : '') +
+      `<span class="upd"> 置信度${a.conf !== undefined ? (a.conf * 100).toFixed(0) : '-'}%` +
+      (a.cost !== null && a.cost !== undefined
+        ? ` · 成本${(a.cost * 100).toFixed(0)}¢ · 命中ROI +${a.potentialRoiPct.toFixed(0)}% · 期望ROI ${a.evRoiPct >= 0 ? '+' : ''}${a.evRoiPct.toFixed(0)}%`
+        : '') +
+      `</span>` +
       `<ul>${a.reasons.map((r) => `<li>· ${escapeHtml(r)}</li>`).join('')}</ul>` +
       bigHtml +
       anomalyHtml
@@ -1086,6 +1132,27 @@ async function refreshSerenity() {
 }
 
 function renderSerenity(daily, mode) {
+  // 行业子指数
+  const subs = buildSubIndices(daily);
+  const subBox = $('serenitySubBox');
+  if (subs.length) {
+    subBox.innerHTML = subs
+      .map((s) => {
+        const cls = s.index.changePct >= 0 ? 'good' : 'bad';
+        return (
+          `<div class="rv-stat">` +
+          `<span><span class="sy-tag" style="background:${s.color}">${s.label}</span> ` +
+          `<span class="sy-note">${s.tickers.join(' ')}</span></span>` +
+          `<span class="rv-rate ${cls}">${s.index.current.toFixed(1)}（${s.index.changePct >= 0 ? '+' : ''}${s.index.changePct.toFixed(1)}%）</span>` +
+          `</div>`
+        );
+      })
+      .join('') +
+      `<div class="sy-note" style="margin-top:3px">子指数=该行业成分等权、基期100 · "Serenity指数-激光/-封装/-光模块…"</div>`;
+  } else {
+    subBox.innerHTML = '<div class="advisor-loading">行情不足，无法合成子指数</div>';
+  }
+
   // 指数
   const idx = buildSerenityIndex(daily);
   const idxBox = $('serenityIndexBox');
@@ -1153,6 +1220,7 @@ function renderSerenity(daily, mode) {
   // 方法论
   const pr = SERENITY_PROFILE;
   $('serenityProfileBox').innerHTML =
+    `<div class="rv-stat"><span>持股数据更新于</span><span>${formatTime(SERENITY_DATA_UPDATED)}</span></div>` +
     `<div class="rv-stat"><span>账号</span><span><a href="${pr.url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${pr.handle}</a>（${pr.followers}粉丝）</span></div>` +
     `<div class="rv-stat"><span>风格</span><span>${escapeHtml(pr.style)}</span></div>` +
     `<div class="interp"><b>核心框架：</b>${escapeHtml(pr.framework)}</div>` +
@@ -1218,6 +1286,67 @@ async function renderCompanyDetail(ticker, el, pick) {
           .join('');
     })
     .catch(() => {});
+}
+
+/** Serenity组合动态监控：近2天新闻 + 解读徽章，10分钟自动刷新 */
+async function refreshSerenityFeed() {
+  const box = $('serenityFeedBox');
+  const items = await fetchSerenityFeed();
+  if (!items.length) {
+    setHtmlIfChanged(box, '<div class="advisor-loading">暂无近2天动态或网络受限</div>');
+    return;
+  }
+  setHtmlIfChanged(
+    box,
+    items
+      .map((it) => {
+        const itp = interpret(it.title);
+        return (
+          `<div class="co-news-i"><span class="bias ${itp.bias}">${itp.biasLabel}</span>` +
+          `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(it.title)}</a>` +
+          `<span class="sy-note"> · ${formatTime(it.time)}</span></div>`
+        );
+      })
+      .join('') +
+      `<div class="sy-note" style="margin-top:4px">说明：X推文API需付费，无法直接抓取@aleabitoreddit实时推文；` +
+      `本面板监控其重点标的的公开新闻作为替代信号，其X主页：` +
+      `<a href="https://x.com/aleabitoreddit" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">x.com/aleabitoreddit</a></div>`
+  );
+}
+
+// ---------------- 多品种后台信号监控（全交易对提示音） ----------------
+
+const watcherState = { timer: null, running: false };
+
+async function watchAllSymbols() {
+  if (watcherState.running || state.usingMock) return;
+  watcherState.running = true;
+  try {
+    // 只轮询非当前品种的加密品种（当前品种已有实时流；NDX轮询成本高且盘后无变化）
+    const targets = SYMBOLS.filter((s) => s.id !== state.symbol && s.source !== 'stock');
+    for (const sym of targets) {
+      try {
+        const candles = await fetchHistory(sym.id, state.interval, 160);
+        if (candles.length < 60) continue;
+        const ind = computeAll(candles);
+        const signals = generateSignals(candles, ind);
+        if (!signals.length) continue;
+        const lastClosed = candles[candles.length - 2]?.time;
+        const s = signals[signals.length - 1];
+        if (s.time !== lastClosed) continue; // 只报最新收盘K线上的信号
+        alerts.fireRisk({
+          key: `watch|${sym.id}|${s.time}|${s.side}`,
+          title: `${sym.label} ${s.side === 'buy' ? '买入' : '卖出'}信号（强度${s.score}）`,
+          body: s.reasons.join('；'),
+          kind: s.side,
+        });
+      } catch (_) {
+        /* 单品种失败不影响其他 */
+      }
+    }
+  } finally {
+    watcherState.running = false;
+  }
 }
 
 // ---------------- 历史回测 ----------------
@@ -1311,7 +1440,14 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     document
       .querySelectorAll('.tab-page')
       .forEach((p) => p.classList.toggle('active', p.id === btn.dataset.tab));
-    if (btn.dataset.tab === 'tabSerenity') refreshSerenity(); // 懒加载股票行情
+    if (btn.dataset.tab === 'tabSerenity') {
+      refreshSerenity(); // 懒加载股票行情
+      if (!$('serenityFeedBox').dataset.loaded) {
+        $('serenityFeedBox').dataset.loaded = '1';
+        refreshSerenityFeed();
+        setInterval(refreshSerenityFeed, 10 * 60 * 1000);
+      }
+    }
     if (btn.dataset.tab === 'tabBacktest' && !$('backtestBox').dataset.ran) {
       $('backtestBox').dataset.ran = '1';
       runBacktestPanel();
@@ -1399,3 +1535,5 @@ setInterval(() => {
   settleReviews();
   renderReviewPanel();
 }, 60 * 1000);
+// 全品种信号监控：每2分钟轮询其他交易对，有信号即提示音+通知
+setInterval(watchAllSymbols, 2 * 60 * 1000);

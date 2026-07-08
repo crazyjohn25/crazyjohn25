@@ -304,6 +304,65 @@ export function swingLevels(candles, { lookback = 80, wings = 2 } = {}) {
   return { support, resistance };
 }
 
+/**
+ * CCI 顺势指标
+ */
+export function cci(candles, period = 20) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+  for (let i = period - 1; i < n; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += tp[j];
+    const ma = sum / period;
+    let dev = 0;
+    for (let j = i - period + 1; j <= i; j++) dev += Math.abs(tp[j] - ma);
+    const md = dev / period;
+    out[i] = md === 0 ? 0 : (tp[i] - ma) / (0.015 * md);
+  }
+  return out;
+}
+
+/**
+ * MFI 资金流量指标（成交量加权RSI）
+ */
+export function mfi(candles, period = 14) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if (n <= period) return out;
+  const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+  for (let i = period; i < n; i++) {
+    let pos = 0;
+    let neg = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const flow = tp[j] * candles[j].volume;
+      if (tp[j] > tp[j - 1]) pos += flow;
+      else if (tp[j] < tp[j - 1]) neg += flow;
+    }
+    out[i] = neg === 0 ? 100 : 100 - 100 / (1 + pos / neg);
+  }
+  return out;
+}
+
+/**
+ * Williams %R 威廉指标（-100~0）
+ */
+export function willr(candles, period = 14) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    let hh = -Infinity;
+    let ll = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (candles[j].high > hh) hh = candles[j].high;
+      if (candles[j].low < ll) ll = candles[j].low;
+    }
+    const range = hh - ll;
+    out[i] = range === 0 ? -50 : ((hh - candles[i].close) / range) * -100;
+  }
+  return out;
+}
+
 /** 一次性计算全部指标，供图表与信号引擎复用 */
 export function computeAll(candles, params = {}) {
   const closes = candles.map((c) => c.close);
@@ -319,5 +378,8 @@ export function computeAll(candles, params = {}) {
     ema20: ema(closes, 20),
     ema50: ema(closes, 50),
     ema200: ema(closes, 200),
+    cci: cci(candles, params.cciPeriod),
+    mfi: mfi(candles, params.mfiPeriod),
+    willr: willr(candles, params.willrPeriod),
   };
 }

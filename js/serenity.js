@@ -77,12 +77,18 @@ export const SERENITY_PICKS = [
  * Serenity指数：等权基期100
  * @param {Object} daily { ticker: {candles} } fetchDailyBatch 输出
  * @param {number} baseDaysAgo 基期（默认30天前）
+ * @param {Array} picks 成分（默认全部推荐，可传子集构建子指数）
  * @returns {{ series: [{time,value}], current, changePct, covered, total } | null}
  */
-export function buildSerenityIndex(daily, baseDaysAgo = 30, nowSec = Math.floor(Date.now() / 1000)) {
+export function buildSerenityIndex(
+  daily,
+  baseDaysAgo = 30,
+  nowSec = Math.floor(Date.now() / 1000),
+  picks = SERENITY_PICKS
+) {
   const baseTime = nowSec - baseDaysAgo * 86400;
   const valid = [];
-  for (const p of SERENITY_PICKS) {
+  for (const p of picks) {
     const d = daily[p.ticker];
     if (!d || !d.candles || d.candles.length < 5) continue;
     const candles = d.candles.filter((c) => c.time >= baseTime - 86400 * 5);
@@ -123,8 +129,61 @@ export function buildSerenityIndex(daily, baseDaysAgo = 30, nowSec = Math.floor(
     current,
     changePct: current - 100,
     covered: valid.length,
-    total: SERENITY_PICKS.length,
+    total: picks.length,
   };
+}
+
+/**
+ * 行业子指数：Serenity指数-激光 / -封装 / -光模块 等
+ * @returns {Array<{industry, label, color, tickers, index}>} 按30天表现降序
+ */
+export function buildSubIndices(daily, baseDaysAgo = 30, nowSec = Math.floor(Date.now() / 1000)) {
+  const out = [];
+  for (const [key, meta] of Object.entries(INDUSTRIES)) {
+    const picks = SERENITY_PICKS.filter((p) => p.industry === key);
+    if (picks.length === 0) continue;
+    const index = buildSerenityIndex(daily, baseDaysAgo, nowSec, picks);
+    if (!index) continue;
+    out.push({
+      industry: key,
+      label: meta.label,
+      color: meta.color,
+      tickers: picks.map((p) => p.ticker),
+      index,
+    });
+  }
+  return out.sort((a, b) => b.index.changePct - a.index.changePct);
+}
+
+/**
+ * Serenity组合动态监控：抓取其重点持仓/推荐标的的最新新闻（近2天）
+ * 经 rss2json + Google News（X推文API需付费，无法直接抓取，本源作为公开替代信号）
+ */
+export async function fetchSerenityFeed() {
+  const q = encodeURIComponent(
+    'AXTI OR AAOI OR Lumentum OR Coherent OR "Tower Semiconductor" OR Nebius OR "AXT Inc" when:2d'
+  );
+  const url = `https://news.google.com/rss/search?q=${q}&hl=en-US&gl=US&ceid=US:en`;
+  try {
+    const res = await fetch(
+      'https://api.rss2json.com/v1/api.json?rss_url=' + encodeURIComponent(url),
+      { signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (data.status !== 'ok' || !Array.isArray(data.items)) return [];
+    return data.items
+      .map((it) => ({
+        title: it.title || '',
+        url: it.link || '',
+        time: Math.floor(new Date(it.pubDate).getTime() / 1000) || 0,
+      }))
+      .filter((x) => x.title && x.time)
+      .sort((a, b) => b.time - a.time)
+      .slice(0, 10);
+  } catch (_) {
+    return [];
+  }
 }
 
 /**
@@ -171,6 +230,9 @@ export async function fetchLivePicks(apiUrl) {
     return [];
   }
 }
+
+/** 数据集最后更新时间（UTC秒），持续维护时更新此值 */
+export const SERENITY_DATA_UPDATED = Date.UTC(2026, 6, 8) / 1000;
 
 /** Serenity方法论摘要（深度分析，静态知识卡片） */
 export const SERENITY_PROFILE = {

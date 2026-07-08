@@ -49,7 +49,7 @@ export function generateSignals(candles, ind, opts = {}) {
   };
 
   const signals = [];
-  const { macd, boll, rsi, kdj, dmi, obv } = ind;
+  const { macd, boll, rsi, kdj, dmi, obv, cci, mfi, willr, ema20, ema50 } = ind;
 
   for (let i = 1; i < candles.length; i++) {
     const buyReasons = [];
@@ -115,6 +115,41 @@ export function generateSignals(candles, ind, opts = {}) {
     // --- DMI 方向 ---
     if (crossUp(dmi.pdi, dmi.mdi, i)) buyReasons.push('DMI +DI上穿-DI');
     if (crossDown(dmi.pdi, dmi.mdi, i)) sellReasons.push('DMI +DI下穿-DI');
+
+    // --- EMA20/50 金叉死叉（趋势结构确认） ---
+    if (ema20 && ema50) {
+      if (crossUp(ema20, ema50, i)) buyReasons.push('EMA20上穿EMA50金叉');
+      if (crossDown(ema20, ema50, i)) sellReasons.push('EMA20下穿EMA50死叉');
+    }
+
+    // --- CCI 顺势指标（±100界限突破） ---
+    if (cci && cci[i] !== null && cci[i - 1] !== null) {
+      if (cci[i - 1] < -100 && cci[i] >= -100) buyReasons.push(`CCI回升穿越-100(${cci[i].toFixed(0)})`);
+      if (cci[i - 1] > 100 && cci[i] <= 100) sellReasons.push(`CCI回落跌破+100(${cci[i].toFixed(0)})`);
+    }
+
+    // --- MFI 资金流量（量价共振的超买超卖） ---
+    if (mfi && mfi[i] !== null && mfi[i - 1] !== null) {
+      if (mfi[i - 1] < 20 && mfi[i] >= 20) buyReasons.push(`MFI脱离超卖区(${mfi[i].toFixed(0)})，资金回流`);
+      if (mfi[i - 1] > 80 && mfi[i] <= 80) sellReasons.push(`MFI脱离超买区(${mfi[i].toFixed(0)})，资金流出`);
+    }
+
+    // --- Williams %R 超短线反转 ---
+    if (willr && willr[i] !== null && willr[i - 1] !== null) {
+      if (willr[i - 1] < -80 && willr[i] >= -80) buyReasons.push(`W%R从超卖区回升(${willr[i].toFixed(0)})`);
+      if (willr[i - 1] > -20 && willr[i] <= -20) sellReasons.push(`W%R从超买区回落(${willr[i].toFixed(0)})`);
+    }
+
+    // --- 放量确认（当根成交量>前20根均量2倍，方向与K线实体一致时加分） ---
+    if (i >= 20) {
+      let volSum = 0;
+      for (let j = i - 20; j < i; j++) volSum += candles[j].volume;
+      const volAvg = volSum / 20;
+      if (volAvg > 0 && c.volume > volAvg * 2) {
+        if (c.close > c.open && buyReasons.length > 0) buyReasons.push(`放量${(c.volume / volAvg).toFixed(1)}倍上攻`);
+        if (c.close < c.open && sellReasons.length > 0) sellReasons.push(`放量${(c.volume / volAvg).toFixed(1)}倍下杀`);
+      }
+    }
 
     // --- OBV 量价确认（近5根K线 OBV 走势与价格同向） ---
     if (i >= 5 && obv[i] !== null && obv[i - 5] !== null) {
@@ -209,19 +244,44 @@ export class AlertManager {
     this.beep(signal.side);
   }
 
-  beep(side) {
+  /**
+   * 风险/事件提示（异常交易、PM方向信号等）：去重后弹通知+特殊提示音
+   * @param {Object} p { key 去重键, title, body, kind 'risk'|'buy'|'sell' }
+   */
+  fireRisk({ key, title, body, kind = 'risk' }) {
+    if (key) {
+      if (this.seen.has(key)) return;
+      this.seen.add(key);
+    }
+    if (this.onAlert) this.onAlert({ signal: { side: kind, reasons: [body] }, symbol: '', title, body });
+    if (
+      !this.muted &&
+      typeof Notification !== 'undefined' &&
+      Notification.permission === 'granted'
+    ) {
+      new Notification(title, { body });
+    }
+    this.beep(kind);
+  }
+
+  /** buy=880Hz单音 / sell=440Hz单音 / risk=660Hz双脉冲 */
+  beep(kind) {
     if (this.muted || typeof AudioContext === 'undefined') return;
     try {
       const ctx = new AudioContext();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.frequency.value = side === 'buy' ? 880 : 440;
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.4);
-      osc.onended = () => ctx.close();
+      const pulses = kind === 'risk' ? [0, 0.25] : [0];
+      const freq = kind === 'buy' ? 880 : kind === 'sell' ? 440 : 660;
+      for (const t0 of pulses) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.15, ctx.currentTime + t0);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t0 + 0.2);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(ctx.currentTime + t0);
+        osc.stop(ctx.currentTime + t0 + 0.22);
+      }
+      setTimeout(() => ctx.close().catch(() => {}), 700);
     } catch (_) {
       /* 浏览器策略可能禁止自动播放，忽略 */
     }
