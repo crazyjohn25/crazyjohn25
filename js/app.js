@@ -59,7 +59,7 @@ import { PmHistory, pmDeepStats, pmReflections } from './pmstats.js';
 import { KOLS, fetchKolSignals } from './radar.js';
 
 /** 版本号：与 data/version.json 同步，旧部署会被远端更高版本强制引导到最新地址 */
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 
 const $ = (id) => document.getElementById(id);
 
@@ -1515,7 +1515,8 @@ function renderWalletTab() {
   const spotEq = wallet.equitySpot(prices);
   const pmEq = wallet.pmEquity();
   const total = spotEq + pmEq;
-  const totalRet = ((total - 2000) / 2000) * 100;
+  const base = wallet.baseCapital || 11000;
+  const totalRet = ((total - base) / base) * 100;
   const s = wallet.stats();
   const pct = (x) => (x === null ? '-' : (x * 100).toFixed(0) + '%');
 

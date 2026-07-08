@@ -35,6 +35,7 @@ export class PaperWallet {
     const s = this._load();
     this.cash = s.cash ?? 10000;
     this.pmCash = s.pmCash ?? 1000;
+    this.baseCapital = s.baseCapital ?? 11000; // 初始本金+历次注资，收益率基准
     this.positions = s.positions || [];
     this.closed = s.closed || [];
     this.bets = s.bets || [];
@@ -62,6 +63,7 @@ export class PaperWallet {
       JSON.stringify({
         cash: this.cash,
         pmCash: this.pmCash,
+        baseCapital: this.baseCapital,
         positions: this.positions,
         closed: this.closed,
         bets: this.bets,
@@ -203,12 +205,13 @@ export class PaperWallet {
     return this.pmCash + this.bets.reduce((s, b) => s + b.stake, 0);
   }
 
-  /** 手动注资（增加虚拟资本） */
+  /** 手动注资（增加虚拟资本），同步抬高收益率基准，不虚增收益 */
   addFunds(amount, target = 'spot') {
     const amt = Number(amount);
     if (!Number.isFinite(amt) || amt <= 0 || amt > 1000000) return false;
     if (target === 'pm') this.pmCash += amt;
     else this.cash += amt;
+    this.baseCapital += amt;
     this._save();
     return true;
   }

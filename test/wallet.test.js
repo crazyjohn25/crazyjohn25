@@ -51,12 +51,15 @@ test('做空止损与强平（100x下反向0.95%即强平）', () => {
   assert.ok(Math.abs(closed[0].pnl - -500) < 1e-9, '强平损失全部保证金');
 });
 
-test('addFunds 手动注资', () => {
+test('addFunds 手动注资并同步抬高收益基准', () => {
   const w = mkWallet();
+  assert.equal(w.baseCapital, 11000);
   assert.ok(w.addFunds(5000, 'spot'));
   assert.equal(w.cash, 15000);
+  assert.equal(w.baseCapital, 16000, '注资应计入本金基准，不虚增收益率');
   assert.ok(w.addFunds('2000', 'pm'));
   assert.equal(w.pmCash, 3000);
+  assert.equal(w.baseCapital, 18000);
   assert.ok(!w.addFunds(-5, 'spot'));
   assert.ok(!w.addFunds('abc', 'spot'));
 });
