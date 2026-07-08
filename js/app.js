@@ -1084,8 +1084,11 @@ function renderSerenity(daily, mode) {
   const idxBox = $('serenityIndexBox');
   if (idx) {
     const cls = idx.changePct >= 0 ? 'up' : 'down';
+    const step = Math.ceil(idx.series.length / 20);
     const spark = idx.series
-      .map((p, i) => (i % Math.ceil(idx.series.length / 20) === 0 ? p.value.toFixed(1) : null))
+      .map((p, i) =>
+        i % step === 0 || i === idx.series.length - 1 ? p.value.toFixed(1) : null
+      )
       .filter(Boolean)
       .join(' → ');
     idxBox.innerHTML =

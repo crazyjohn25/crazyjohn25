@@ -8,7 +8,12 @@
 4. **多周期综合建议**：每30分钟在 **15m / 30m / 1h / 4h** 四个周期上综合 RSI、成交量、MACD、BOLL、KDJ、DMI 打分，按周期加权（4h权重最高）给出【买入/轻仓试多/观望/减仓防守/卖出】建议，附各周期理由与解读，可点按钮立即重算。
 5. **每小时交易量对比**：主图底部叠加成交量柱；侧栏基于1小时K线列出最近12小时交易量，包含**环比**与**vs 过去7日同一时段均值**两个横向对比维度，以及24小时滚动总量对比。
 6. **异常交易监控**：基于统计的量价异动检测（成交量>3σ、单根波动>2.5σ），叠加交易所实时**大额成交（鲸鱼单）**监听（Binance aggTrade / Hyperliquid trades流）。
-7. **多交易所品种**：Binance（BTC/ETH/SOL/BNB-USDT）+ **Hyperliquid（HYPE/USDC）**，均使用官方公开API，无需API Key。
+7. **多市场品种**：Binance（BTC/ETH/SOL/BNB-USDT）+ **Hyperliquid（HYPE/USDC）** + **纳斯达克100（NDX，Yahoo公开接口+内置快照降级）**，均无需API Key。
+8. **Polymarket BTC 5分钟玩法**：自动定位当期市场，目标价复刻上图，订单簿/大额订单/异常订单分析，期望值优势建议；**历史回滚查看每期推理**、按剩余时间/edge区间做命中率深度统计、错误自动归因（领先过薄/入场过早/资金流误导/尾盘反转）并生成反思结论。
+9. **新闻宏观/微观解读**：信息自动归类为**宏观（国家层面：美联储、非农、失业率、通胀、地缘战争、大宗）**与**微观（公司/行业）**，每条给出**利好/利空判断、影响对象、逻辑原因、需规避的风险**。
+10. **Serenity 跟踪**（X: @aleabitoreddit）：内置其近30天公开推荐股票数据集，按行业+叙事自动评分（0-10），等权合成**Serenity指数**（基期100），附方法论深度解析；重点监控 **MicroStrategy（微策略）** 动向（专属新闻源+高影响标注）。
+11. **全站时间统一 UTC+8（北京时间）**，含图表坐标轴、新闻、信号、统计表。
+12. **侧栏Tab化**：建议 / PM 5分钟 / 新闻解读 / 市场数据 / Serenity 五个标签页，减少滚动。
 
 ## 快速开始
 
@@ -83,8 +88,15 @@ js/volume.js        每小时交易量统计与横向对比（纯函数）
 js/anomaly.js       异常交易检测（量价异动统计 + 鲸鱼单缓存 + 外部源钩子）
 js/news.js          真实宏观新闻抓取与相关性过滤
 js/events.js        宏观事件（内置/自定义）
-js/datafeed.js      行情数据源（Binance + Hyperliquid + 离线模拟降级）
+js/interpret.js     新闻宏观/微观归类 + 利好利空解读引擎
+js/polymarket.js    Polymarket 5分钟玩法（市场/订单簿/成交流/建议）
+js/pmstats.js       PM 5分钟历史、深度统计与错误归因反思
+js/review.js        建议复盘与自适应权重
+js/serenity.js      Serenity推荐数据集、指数合成与自动评分
+js/stocks.js        股票行情（Yahoo + CORS代理链 + 内置快照降级）
+js/datafeed.js      行情数据源（Binance + Hyperliquid + 股票 + 离线模拟降级）
 js/app.js           页面主逻辑
+data/stocks-snapshot.json  股票日线快照（构建时生成，离线兜底）
 test/               单元测试（node:test）
 ```
 
