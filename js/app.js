@@ -1418,6 +1418,9 @@ async function refreshSerenityFeed() {
 function considerAutoTrades() {
   const adv = state.advice;
   if (!adv || !state.candles.length) return;
+  // 离线模拟行情下暂停自动交易：图表与指标用的是两条独立随机序列，
+  // 价差会造成虚假的瞬间止损/止盈，污染绩效统计
+  if (state.usingMock) return;
   const price = state.candles[state.candles.length - 1].close;
   const now = Math.floor(Date.now() / 1000);
   for (const st of adv.strategies) {
@@ -1535,6 +1538,9 @@ function renderWalletTab() {
     `<details style="margin-top:6px"><summary class="tf-head"><span class="tf-name">每小时收益（近12小时）</span></summary>${hourlyHtml}</details>` +
     `<details style="margin-top:6px"><summary class="tf-head"><span class="tf-name">合约平仓历史</span></summary>${closedHtml || '<div class="sy-note">暂无</div>'}</details>` +
     `<details style="margin-top:6px"><summary class="tf-head"><span class="tf-name">PM注单历史</span></summary>${betHistHtml || '<div class="sy-note">暂无</div>'}</details>` +
+    (state.usingMock
+      ? `<div class="rv-reflect" style="margin-top:6px">⚠ 当前为离线模拟行情，自动交易已暂停（避免虚假价差污染绩效）；连接真实行情后自动恢复。</div>`
+      : '') +
     `<div class="rv-reflect" style="margin-top:6px">规则：初始$1000合约+$1000 PM · 单笔保证金$100-200 · 杠杆2-10x（短线5x/中短3x/长线2x） · ` +
     `taker手续费0.05%/边 · 亏损95%强平 · 只做重大共振信号 · 同品种同策略6小时冷却 · 最多3仓 · PM每期唯一决策$50-100</div>`;
 }
