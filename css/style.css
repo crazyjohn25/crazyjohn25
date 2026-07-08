@@ -255,6 +255,43 @@ body {
 .review-box .up { color: var(--buy); }
 .review-box .down { color: var(--sell); }
 
+/* 版本门 */
+.version-gate {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 13, 19, .96);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.version-gate.hidden { display: none; }
+.vg-box {
+  text-align: center;
+  padding: 32px 40px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.vg-box h2 { color: var(--sell); margin: 0 0 10px; }
+.vg-box p { color: var(--muted); margin: 0 0 16px; }
+.vg-box a {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  padding: 10px 22px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+/* KOL雷达 */
+.kol-item { padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.kol-name { color: var(--accent); font-weight: 600; margin-right: 5px; }
+.kol-item a { color: var(--text); text-decoration: none; }
+.kol-item a:hover { color: var(--accent); }
+.kol-list-note { margin-top: 6px; }
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

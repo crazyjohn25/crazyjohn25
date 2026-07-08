@@ -8,42 +8,62 @@ function mkWallet() {
   return new PaperWallet({}); // 无localStorage时自动用内存存储
 }
 
-test('开仓收取手续费并冻结保证金', () => {
+test('开仓收取手续费并冻结保证金（初始$10000，杠杆下限20x）', () => {
   const w = mkWallet();
-  const pos = w.openPosition({ symbol: 'BTCUSDT', side: 'long', price: 100, margin: 150, leverage: 5, time: T0, strategy: 'short' });
+  const pos = w.openPosition({ symbol: 'BTCUSDT', side: 'long', price: 100, margin: 500, leverage: 20, time: T0, strategy: 'short' });
   assert.ok(pos.id);
-  const fee = 150 * 5 * FEE_RATE;
-  assert.ok(Math.abs(w.cash - (1000 - 150 - fee)) < 1e-9);
+  const fee = 500 * 20 * FEE_RATE;
+  assert.ok(Math.abs(w.cash - (10000 - 500 - fee)) < 1e-9);
   assert.equal(w.positions.length, 1);
+});
+
+test('保证金与杠杆强制夹取到 [500,1000] 与 [20,100]', () => {
+  const w = mkWallet();
+  const pos = w.openPosition({ symbol: 'X', side: 'long', price: 100, margin: 100, leverage: 5, time: T0, strategy: 's' });
+  assert.equal(pos.margin, 500);
+  assert.equal(pos.leverage, 20);
+  const pos2 = w.openPosition({ symbol: 'Y', side: 'long', price: 100, margin: 5000, leverage: 500, time: T0, strategy: 's' });
+  assert.equal(pos2.margin, 1000);
+  assert.equal(pos2.leverage, 100);
 });
 
 test('止盈自动平仓：盈亏与ROI正确', () => {
   const w = mkWallet();
-  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 100, leverage: 5, target: 110, stop: 95, time: T0, strategy: 'short' });
-  const closed = w.markPrice('BTC', 110, T0 + 600);
+  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, target: 101, stop: 99.5, time: T0, strategy: 'short' });
+  const closed = w.markPrice('BTC', 101, T0 + 600);
   assert.equal(closed.length, 1);
   const t = closed[0];
   assert.equal(t.cause, 'target');
-  // pnl = 500 * 10% = 50；开平手续费各 500*0.0005=0.25
-  assert.ok(Math.abs(t.pnl - 50) < 1e-9);
-  assert.ok(Math.abs(t.netPnl - (50 - 0.25 - 0.25)) < 1e-9);
-  assert.ok(Math.abs(t.roiPct - ((50 - 0.5) / 100) * 100) < 1e-6);
-  assert.ok(Math.abs(w.cash - (1000 - 0.25 + 50 - 0.25)) < 1e-9);
+  // notional 10000, +1% → pnl 100；手续费 5/边
+  assert.ok(Math.abs(t.pnl - 100) < 1e-9);
+  assert.ok(Math.abs(t.netPnl - (100 - 5 - 5)) < 1e-9);
+  assert.ok(Math.abs(t.roiPct - ((100 - 10) / 500) * 100) < 1e-6);
+  assert.ok(Math.abs(w.cash - (10000 - 5 + 100 - 5)) < 1e-9);
 });
 
-test('做空止损与强平', () => {
+test('做空止损与强平（100x下反向0.95%即强平）', () => {
   const w = mkWallet();
-  w.openPosition({ symbol: 'ETH', side: 'short', price: 100, margin: 100, leverage: 10, stop: 103, time: T0, strategy: 'mid' });
-  // 10x做空，价格+9.5% → 亏损95 → 达到95%强平线
-  const closed = w.markPrice('ETH', 109.5, T0 + 60);
+  w.openPosition({ symbol: 'ETH', side: 'short', price: 100, margin: 500, leverage: 100, stop: 103, time: T0, strategy: 'mid' });
+  // 100x做空，价格+0.95% → 亏损475 = 95%保证金 → 强平
+  const closed = w.markPrice('ETH', 100.95, T0 + 60);
   assert.equal(closed.length, 1);
   assert.equal(closed[0].cause, 'liquidated');
-  assert.ok(Math.abs(closed[0].pnl - -100) < 1e-9, '强平损失全部保证金');
+  assert.ok(Math.abs(closed[0].pnl - -500) < 1e-9, '强平损失全部保证金');
+});
+
+test('addFunds 手动注资', () => {
+  const w = mkWallet();
+  assert.ok(w.addFunds(5000, 'spot'));
+  assert.equal(w.cash, 15000);
+  assert.ok(w.addFunds('2000', 'pm'));
+  assert.equal(w.pmCash, 3000);
+  assert.ok(!w.addFunds(-5, 'spot'));
+  assert.ok(!w.addFunds('abc', 'spot'));
 });
 
 test('风控：最多3仓、同键去重、冷却、余额不足', () => {
   const w = mkWallet();
-  const base = { side: 'long', price: 100, margin: 150, leverage: 2, time: T0 };
+  const base = { side: 'long', price: 100, margin: 500, leverage: 20, time: T0 };
   assert.ok(w.openPosition({ ...base, symbol: 'A', strategy: 's' }).id);
   assert.equal(w.openPosition({ ...base, symbol: 'A', strategy: 's' }).rejected, '同品种同策略已有持仓');
   assert.ok(w.openPosition({ ...base, symbol: 'B', strategy: 's' }).id);
@@ -95,8 +115,8 @@ test('权益快照与每日/每小时收益', () => {
 
 test('equitySpot 含浮盈', () => {
   const w = mkWallet();
-  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 100, leverage: 5, time: T0, strategy: 's' });
-  const eq = w.equitySpot({ BTC: 104 });
-  // 现金=1000-100-0.25；持仓价值=100+500*4%=120
-  assert.ok(Math.abs(eq - (1000 - 100 - 0.25 + 100 + 20)) < 1e-9);
+  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, time: T0, strategy: 's' });
+  const eq = w.equitySpot({ BTC: 100.4 });
+  // 现金=10000-500-5；持仓价值=500+10000*0.4%=540
+  assert.ok(Math.abs(eq - (10000 - 500 - 5 + 500 + 40)) < 1e-9);
 });

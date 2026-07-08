@@ -30,6 +30,9 @@ export const NEWS_FEEDS = [
   { source: 'Yahoo加密', url: 'https://finance.yahoo.com/news/rssindex' },
   { source: 'CoinTelegraph', url: 'https://cointelegraph.com/rss' },
   { source: 'Decrypt', url: 'https://decrypt.co/feed' },
+  { source: 'PANews', url: 'https://rss.panewslab.com/zh/tvsq/rss' },
+  { source: 'PANews·TG', url: 'https://rsshub.rssforever.com/telegram/channel/ChannelPANews' },
+  { source: 'Foresight·TG', url: 'https://rsshub.rssforever.com/telegram/channel/foresightnews' },
   {
     source: 'Google加密快讯',
     url: 'https://news.google.com/rss/search?q=(crypto%20OR%20bitcoin%20OR%20ethereum)%20when:1d&hl=en-US&gl=US&ceid=US:en',

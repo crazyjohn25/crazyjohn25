@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=9" />
+  <link rel="stylesheet" href="css/style.css?v=10" />
   <!-- TradingView 开源图表库 lightweight-charts -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -99,6 +99,8 @@
         <div class="panel">
           <h3>模拟交易钱包 <span class="h-note">$1000合约 + $1000 PM · 自动执行高置信信号</span></h3>
           <div id="walletBox" class="review-box"><div class="advisor-loading">初始化中…</div></div>
+          <button id="walletAddSpot" class="btn-small">+ 增加合约虚拟资本</button>
+          <button id="walletAddPm" class="btn-small">+ 增加PM虚拟资本</button>
           <button id="walletReset" class="btn-small">重置钱包（清空全部记录）</button>
         </div>
       </div>
@@ -130,6 +132,14 @@
 
       <!-- Tab 3: 新闻解读（宏观/微观） -->
       <div class="tab-page" id="tabNews">
+        <div class="panel">
+          <button id="newsRefresh" class="btn-small" style="width:100%;margin:0 0 4px">↻ 立即刷新全部新闻源</button>
+          <div id="newsRefreshStatus" class="sy-note"></div>
+        </div>
+        <div class="panel">
+          <h3>KOL信号雷达 <span class="h-note">BTC/ETH/HYPE · 10位知名交易员 · 10分钟刷新</span></h3>
+          <div id="kolBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+        </div>
         <div class="panel">
           <h3>宏观信息（国家层面）<span class="h-note">货币政策 · 数据 · 地缘 · 大宗</span></h3>
           <ul id="macroList" class="event-list"></ul>
@@ -215,7 +225,14 @@
 
   <div id="toastContainer" class="toast-container"></div>
   <div id="tooltip" class="tooltip hidden"></div>
+  <div id="versionGate" class="version-gate hidden">
+    <div class="vg-box">
+      <h2>此版本已停用</h2>
+      <p>你打开的是旧版本页面。为保证数据与策略一致，请使用最新版本：</p>
+      <a id="vgLink" href="https://raw.githack.com/crazyjohn25/crazyjohn25/cursor/tradingview-macro-signals-bd5c/index.html">打开最新版本 →</a>
+    </div>
+  </div>
 
-  <script type="module" src="js/app.js?v=9"></script>
+  <script type="module" src="js/app.js?v=10"></script>
 </body>
 </html>

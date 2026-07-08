@@ -1,14 +1,20 @@
 /**
  * 模拟交易钱包（Paper Trading）
- * - 合约钱包：初始$1000，单笔保证金$100-200，杠杆2-10x，
+ * - 合约钱包：初始$10000，单笔保证金$500-1000，杠杆20-100x，
  *   吃单手续费 0.05%/边（按名义价值，参照币安USDT永续taker费率），
  *   止损/止盈自动平仓，亏损达保证金95%触发强平（简化的逐仓模型，不含资金费率）。
- * - PM钱包：初始$1000，每注$50-100，按成本价买入份额，命中每份赔付$1（Polymarket无交易费，忽略gas）。
+ *   高杠杆警示：50x下价格反向1.9%即强平，止损必须严格执行。
+ * - PM钱包：初始$1000，每注$50-100，按订单簿真实卖一价买入份额，命中每份赔付$1。
+ * - 支持手动注资（增加虚拟资本）。
  * - 权益快照：每小时记录，支持每日/每小时收益复盘。
  * 核心风控：最多3个并存仓位、同品种同策略去重、6小时同键冷却、只做高置信信号。
  */
 
 export const FEE_RATE = 0.0005; // taker 0.05%/边
+export const MARGIN_MIN = 500;
+export const MARGIN_MAX = 1000;
+export const LEV_MIN = 20;
+export const LEV_MAX = 100;
 const LIQ_THRESHOLD = 0.95; // 亏损达保证金95%强平
 
 const memoryStore = () => {
@@ -23,11 +29,11 @@ export class PaperWallet {
   constructor(opts = {}) {
     this.storage =
       opts.storage || (typeof localStorage !== 'undefined' ? localStorage : memoryStore());
-    this.key = opts.key || 'kchart.paperWallet.v1';
+    this.key = opts.key || 'kchart.paperWallet.v2';
     this.maxOpen = opts.maxOpen || 3;
     this.cooldownSec = opts.cooldownSec || 6 * 3600;
     const s = this._load();
-    this.cash = s.cash ?? 1000;
+    this.cash = s.cash ?? 10000;
     this.pmCash = s.pmCash ?? 1000;
     this.positions = s.positions || [];
     this.closed = s.closed || [];
@@ -74,8 +80,8 @@ export class PaperWallet {
    * @returns {Object|{rejected:string}} 持仓 或 拒绝原因
    */
   openPosition({ symbol, side, price, margin, leverage, stop, target, reason, time, strategy }) {
-    margin = Math.max(100, Math.min(200, margin || 150));
-    leverage = Math.max(2, Math.min(10, leverage || 3));
+    margin = Math.max(MARGIN_MIN, Math.min(MARGIN_MAX, margin || MARGIN_MIN));
+    leverage = Math.max(LEV_MIN, Math.min(LEV_MAX, leverage || LEV_MIN));
     const k = `${symbol}|${strategy}`;
 
     if (this.positions.length >= this.maxOpen) return { rejected: `已达最大并存仓位${this.maxOpen}个` };
@@ -195,6 +201,16 @@ export class PaperWallet {
   pmEquity() {
     // 未结算注按成本计
     return this.pmCash + this.bets.reduce((s, b) => s + b.stake, 0);
+  }
+
+  /** 手动注资（增加虚拟资本） */
+  addFunds(amount, target = 'spot') {
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0 || amt > 1000000) return false;
+    if (target === 'pm') this.pmCash += amt;
+    else this.cash += amt;
+    this._save();
+    return true;
   }
 
   // ---------------- 权益快照与复盘 ----------------

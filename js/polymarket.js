@@ -68,6 +68,34 @@ export async function fetchBook(tokenId) {
   return res.json();
 }
 
+/**
+ * 拉取双边订单簿并提取真实成交价格（关键：gamma的outcomePrices是滞后中间价，
+ * 实际买入要吃对手卖单，必须用订单簿卖一价 bestAsk）
+ * @returns {{ upAsk, downAsk, upBid, downBid, upBook, spreadCents }}
+ */
+export async function fetchRealPrices(upTokenId, downTokenId) {
+  const [upBook, downBook] = await Promise.all([
+    upTokenId ? fetchBook(upTokenId) : null,
+    downTokenId ? fetchBook(downTokenId) : null,
+  ]);
+  const bestAsk = (b) =>
+    b && b.asks && b.asks.length ? Math.min(...b.asks.map((l) => Number(l.price))) : null;
+  const bestBid = (b) =>
+    b && b.bids && b.bids.length ? Math.max(...b.bids.map((l) => Number(l.price))) : null;
+  const upAsk = bestAsk(upBook);
+  const downAsk = bestAsk(downBook);
+  return {
+    upAsk,
+    downAsk,
+    upBid: bestBid(upBook),
+    downBid: bestBid(downBook),
+    upBook,
+    // 两边筹码价差（¢）：|Up买价 - Down买价|
+    spreadCents:
+      upAsk !== null && downAsk !== null ? Math.abs(upAsk - downAsk) * 100 : null,
+  };
+}
+
 /** 拉取市场成交记录 */
 export async function fetchTrades(conditionId, limit = 100) {
   const res = await fetch(`${DATA}/trades?market=${conditionId}&limit=${limit}`);
@@ -178,149 +206,190 @@ function rsi1m(closes, period = 7) {
   return al === 0 ? 100 : 100 - 100 / (1 + ag / al);
 }
 
+/** 从tick缓存取n秒前的价格（缓存为[{t,price}]升序） */
+function priceAgo(tickBuffer, nowSec, secondsAgo) {
+  if (!tickBuffer || tickBuffer.length < 2) return null;
+  const target = nowSec - secondsAgo;
+  for (let i = tickBuffer.length - 1; i >= 0; i--) {
+    if (tickBuffer[i].t <= target) return tickBuffer[i].price;
+  }
+  return tickBuffer[0].price;
+}
+
+/** 允许的最高买入成本：越早越便宜，任何时候超过72¢都视为筹码失真 */
+export const MAX_ENTRY_COST = 0.72;
+
 /**
- * 5分钟Up/Down方向建议（纯函数）——盘尾决策版
+ * 5分钟Up/Down方向建议（纯函数）——真实价格+尽早决策版
  *
- * 设计原则：
- * 1. 方向判断只依据K线技术面（价格vs目标价、1分钟动能、短周期RSI、量能方向、窗口VWAP）
- *    与Polymarket微观结构（订单簿不平衡、大单资金流）——【不用】Up/Down市场价格反推方向；
- * 2. 只在盘尾决策窗口（剩余30~180秒，即最后2-3分钟）给出方向信号，
- *    早段一律观望——时间越长反转概率越高，这是历史错误归因的最大来源；
- * 3. Up/Down价格仅用于计算买入成本与ROI：买入价值=成本(¢)，命中ROI=(1-成本)/成本，未中=-100%。
+ * 核心修正（针对"成本严重失真"问题）：
+ * 1. 成本与ROI一律使用【订单簿卖一真实买价】(upAsk/downAsk)，不用gamma滞后中间价；
+ * 2. 不再限定盘尾时间窗：每期从头开始侦察，信号一旦充分立即出手——越早筹码越便宜；
+ *    但每期只允许一次方向决策（由调用方锁定）；
+ * 3. 规则1（快速通道）：|现价-目标价|≤$20 且 两边筹码价差≤20¢ → 用30秒/1分钟/5分钟
+ *    三级短线动能快速决断，三者共振即出手；
+ * 4. 规则2（反转警报）：|现价-目标价|≥$30 但 两边筹码价差≤10¢（大幅领先却近似五五开定价）
+ *    → 市场在押注反转，返回 reversalAlert 供调用方报警；
+ * 5. 买入成本>72¢直接放弃（"价格越低越好"）。
  *
- * @returns {{action, techProb, conf, cost, potentialRoiPct, evRoiPct, edge, reasons}}
+ * @param {Object} p { candles1m, tickBuffer, strikePrice, upAsk, downAsk, flow, book, secondsLeft }
+ * @returns {{action, techProb, conf, cost, potentialRoiPct, evRoiPct, edge, reasons, reversalAlert, decided}}
  */
 export function advise5m(p) {
   const reasons = [];
-  const { candles1m, strikePrice, upPrice, flow, book, secondsLeft } = p;
+  const { candles1m, tickBuffer, strikePrice, upAsk, downAsk, flow, book, secondsLeft } = p;
+  const base = { edge: 0, techProb: null, conf: 0, cost: null, potentialRoiPct: null, evRoiPct: null, reversalAlert: false, decided: false };
   if (!candles1m || candles1m.length < 10) {
-    return { action: '数据不足', edge: 0, techProb: null, conf: 0, cost: null, potentialRoiPct: null, evRoiPct: null, reasons: ['1分钟K线不足'] };
+    return { ...base, action: '数据不足', reasons: ['1分钟K线不足'] };
+  }
+  if (strikePrice === null || strikePrice === undefined) {
+    return { ...base, action: '等待目标价确立', reasons: ['窗口起始价尚未生成'] };
   }
   const last = candles1m[candles1m.length - 1];
-  const cur = last.close;
-  const winStart = strikePrice !== null && strikePrice !== undefined;
+  const nowSec = last.time + 59; // 近似当前时刻
+  const cur = tickBuffer && tickBuffer.length ? tickBuffer[tickBuffer.length - 1].price : last.close;
 
-  // ---------- 技术面打分（与市场定价无关） ----------
-  let score = 0; // >0偏Up，<0偏Down
+  const leadUsd = cur - strikePrice;
+  const spreadCents =
+    upAsk !== null && downAsk !== null ? Math.abs(upAsk - downAsk) * 100 : null;
 
-  // 1) 价格 vs 目标价：盘尾领先是最强信号，按ATR尺度归一
-  if (winStart) {
-    const diffPct = ((cur - strikePrice) / strikePrice) * 100;
-    // 用近20根1m的平均振幅估计每分钟波动，衡量领先是否"安全"
-    const c20 = candles1m.slice(-20);
-    const avgRange =
-      c20.reduce((s, c) => s + (c.high - c.low) / c.open, 0) / c20.length * 100 || 0.02;
-    const leadInAtr = avgRange > 0 ? diffPct / avgRange : 0; // 领先了几个"分钟波动"
-    const minutesLeft = secondsLeft / 60;
-    // 领先(分钟波动数) 与 剩余分钟的平方根比较：剩余越少，同样领先越难被逆转
-    const safety = leadInAtr / Math.max(0.5, Math.sqrt(minutesLeft));
-    score += Math.max(-2.2, Math.min(2.2, safety * 1.1));
+  reasons.push(
+    `现价${cur.toFixed(1)} vs 目标价${strikePrice.toFixed(1)}（差${leadUsd >= 0 ? '+' : ''}$${leadUsd.toFixed(1)}），剩余${secondsLeft}秒` +
+      (upAsk !== null && downAsk !== null
+        ? `；真实买价 Up ${(upAsk * 100).toFixed(0)}¢ / Down ${(downAsk * 100).toFixed(0)}¢（订单簿卖一）`
+        : '')
+  );
+
+  // ---------- 规则2：反转警报 ----------
+  let reversalAlert = false;
+  if (Math.abs(leadUsd) >= 30 && spreadCents !== null && spreadCents <= 10) {
+    reversalAlert = true;
     reasons.push(
-      `现价${cur.toFixed(1)} vs 目标价${strikePrice.toFixed(1)}（${diffPct >= 0 ? '+' : ''}${diffPct.toFixed(3)}%＝${leadInAtr.toFixed(1)}个分钟波动，剩余${secondsLeft}秒）`
+      `⚠ 反转警报：价格已领先$${Math.abs(leadUsd).toFixed(0)}但两边筹码仅差${spreadCents.toFixed(0)}¢——` +
+        `聪明钱在押注反转，领先方并不安全`
     );
   }
 
-  // 2) 短线动能：近3根方向 + 最后一根实体强度
-  const c3 = candles1m.slice(-3);
-  const mom = c3.filter((c) => c.close > c.open).length - c3.filter((c) => c.close < c.open).length;
-  if (mom !== 0) {
-    score += mom * 0.35;
-    reasons.push(`近3根1分钟K线${mom > 0 ? '偏多' : '偏空'}（${mom > 0 ? '+' : ''}${mom}）`);
-  }
-  const body = last.high - last.low > 0 ? (last.close - last.open) / (last.high - last.low) : 0;
-  if (Math.abs(body) > 0.5) {
-    score += body * 0.5;
-    reasons.push(`当前1分钟${body > 0 ? '强实体阳线' : '强实体阴线'}（实体占比${(Math.abs(body) * 100).toFixed(0)}%）`);
-  }
+  // ---------- 三级短线动能（30秒 / 1分钟 / 5分钟） ----------
+  const p30 = priceAgo(tickBuffer, nowSec, 30);
+  const mom30 = p30 !== null ? Math.sign(cur - p30) : 0;
+  const c1 = candles1m[candles1m.length - 1];
+  const mom1m = Math.sign(c1.close - c1.open);
+  const c5 = candles1m.slice(-5);
+  const mom5m = Math.sign(c5[c5.length - 1].close - c5[0].open);
+  const momSum = mom30 + mom1m + mom5m;
+  reasons.push(
+    `三级动能：30秒${mom30 > 0 ? '↑' : mom30 < 0 ? '↓' : '—'} / 1分钟${mom1m > 0 ? '↑' : mom1m < 0 ? '↓' : '—'} / 5分钟${mom5m > 0 ? '↑' : mom5m < 0 ? '↓' : '—'}`
+  );
 
-  // 3) 短周期RSI(7)：超短线动量方向
+  // ---------- 技术面打分 ----------
+  let score = 0;
+
+  // 领先度（按分钟波动归一 + 时间衰减）
+  const c20 = candles1m.slice(-20);
+  const avgRangeUsd = c20.reduce((s, c) => s + (c.high - c.low), 0) / c20.length || 1;
+  const leadInAtr = leadUsd / avgRangeUsd;
+  const minutesLeft = Math.max(0.3, secondsLeft / 60);
+  score += Math.max(-2.2, Math.min(2.2, (leadInAtr / Math.sqrt(minutesLeft)) * 1.1));
+
+  // 三级动能
+  score += momSum * 0.35;
+
+  // 1分钟RSI(7)
   const closes = candles1m.slice(-30).map((c) => c.close);
   const r7 = rsi1m(closes, 7);
   if (r7 !== null) {
-    if (r7 > 60) score += 0.4;
-    else if (r7 < 40) score -= 0.4;
-    reasons.push(`1分钟RSI(7)=${r7.toFixed(0)}${r7 > 60 ? '，短线偏强' : r7 < 40 ? '，短线偏弱' : '，中性'}`);
+    if (r7 > 60) score += 0.35;
+    else if (r7 < 40) score -= 0.35;
+    reasons.push(`1分钟RSI(7)=${r7.toFixed(0)}`);
   }
 
-  // 4) 量能方向：窗口内上涨分钟量 vs 下跌分钟量
-  if (winStart) {
-    const winCandles = candles1m.filter((c) => c.time >= p.winStartSec || c.time >= last.time - 300);
-    let upVol = 0;
-    let downVol = 0;
-    for (const c of winCandles.slice(-5)) {
-      if (c.close > c.open) upVol += c.volume;
-      else if (c.close < c.open) downVol += c.volume;
-    }
-    if (upVol + downVol > 0) {
-      const volBias = (upVol - downVol) / (upVol + downVol);
-      if (Math.abs(volBias) > 0.2) {
-        score += volBias * 0.6;
-        reasons.push(`窗口内量能${volBias > 0 ? '买方' : '卖方'}占优（${(Math.abs(volBias) * 100).toFixed(0)}%）`);
-      }
+  // 量能方向（近5根）
+  let upVol = 0;
+  let downVol = 0;
+  for (const c of c5) {
+    if (c.close > c.open) upVol += c.volume;
+    else if (c.close < c.open) downVol += c.volume;
+  }
+  if (upVol + downVol > 0) {
+    const volBias = (upVol - downVol) / (upVol + downVol);
+    if (Math.abs(volBias) > 0.2) {
+      score += volBias * 0.5;
+      reasons.push(`量能${volBias > 0 ? '买方' : '卖方'}占优（${(Math.abs(volBias) * 100).toFixed(0)}%）`);
     }
   }
 
-  // 5) Polymarket微观结构确认（小权重，仅作确认不作主导）
+  // PM微观结构（小权重确认）
   if (flow && flow.bigTrades && flow.bigTrades.length > 0) {
     const bigUp = flow.bigTrades.filter((t) => t.direction === 'up').reduce((s, t) => s + t.usd, 0);
     const bigDown = flow.bigTrades.filter((t) => t.direction === 'down').reduce((s, t) => s + t.usd, 0);
     if (bigUp + bigDown > 500) {
-      const bigBias = (bigUp - bigDown) / (bigUp + bigDown);
-      score += bigBias * 0.3;
+      score += ((bigUp - bigDown) / (bigUp + bigDown)) * 0.3;
       reasons.push(`PM大单：押涨$${bigUp.toFixed(0)} vs 押跌$${bigDown.toFixed(0)}`);
     }
   }
   if (book && Math.abs(book.imbalance) > 0.3) {
     score += book.imbalance * 0.2;
-    reasons.push(`Up订单簿${book.imbalance > 0 ? '买盘厚' : '卖压大'}（${(book.imbalance * 100).toFixed(0)}%）`);
   }
 
-  // ---------- 概率与置信度 ----------
+  // 反转警报时压低对领先方的信心
+  if (reversalAlert) score *= 0.5;
+
   const techProb = Math.min(0.97, Math.max(0.03, 1 / (1 + Math.exp(-score * 1.1))));
-  const conf = Math.abs(techProb - 0.5) * 2; // 0~1
-
-  // ---------- 决策窗口控制（盘尾2-3分钟） ----------
-  let action;
+  const conf = Math.abs(techProb - 0.5) * 2;
   const dir = techProb >= 0.5 ? 'up' : 'down';
-  const extremePricing =
-    upPrice !== null && upPrice !== undefined && (upPrice >= 0.985 || upPrice <= 0.015);
-  if (secondsLeft > 180) {
-    action = '等待盘尾决策窗口（剩余2-3分钟时出手）';
-    reasons.push('早段反转概率高，纪律：只在最后2-3分钟做方向决策');
-  } else if (secondsLeft < 30) {
-    action = '临近结算，勿追单';
-    reasons.push('剩余<30秒，滑点与成交延迟会吃掉优势');
-  } else if (extremePricing) {
-    action = '定价接近极端，本期已无交易价值';
-    reasons.push('市场已定价>98.5¢或<1.5¢，买贵侧ROI趋近0、买便宜侧胜率极低');
-  } else if (conf < 0.2) {
-    action = '信号不足，观望';
-    reasons.push(`技术面置信度仅${(conf * 100).toFixed(0)}%（需≥20%），本期放弃`);
+
+  // ---------- 决策 ----------
+  const fastTrack = Math.abs(leadUsd) <= 20 && spreadCents !== null && spreadCents <= 20;
+  let wantDecide = false;
+  if (secondsLeft < 20) {
+    return { ...base, action: '临近结算，本期放弃', techProb, conf, reversalAlert, reasons: [...reasons, '剩余<20秒，成交延迟风险过高'] };
+  }
+  if (fastTrack) {
+    reasons.push(`快速通道：价差$${Math.abs(leadUsd).toFixed(1)}≤20且筹码价差${spreadCents.toFixed(0)}¢≤20——用三级动能速断`);
+    // 三级动能完全共振，或2/3共振+订单簿同向
+    const bookAgree = book && Math.sign(book.imbalance) === Math.sign(momSum) && Math.abs(book.imbalance) > 0.15;
+    wantDecide = Math.abs(momSum) === 3 || (Math.abs(momSum) >= 1 && bookAgree && conf >= 0.15);
+    if (!wantDecide) reasons.push('三级动能未共振，继续侦察等待时机');
   } else {
-    action = dir === 'up' ? '买Up' : '买Down';
+    wantDecide = conf >= 0.18;
+    if (!wantDecide) reasons.push(`置信度${(conf * 100).toFixed(0)}%不足18%，继续侦察`);
   }
 
-  // ---------- 成本与ROI（市场价只在这里使用，不参与方向判断） ----------
+  // ---------- 成本与ROI（真实卖一价） ----------
+  const ask = dir === 'up' ? upAsk : downAsk;
+  let action = '继续侦察，时机未到';
   let cost = null;
   let potentialRoiPct = null;
   let evRoiPct = null;
   let edge = 0;
-  if (upPrice !== null && upPrice > 0.01 && upPrice < 0.99) {
-    cost = dir === 'up' ? upPrice : 1 - upPrice;
-    potentialRoiPct = ((1 - cost) / cost) * 100;
-    const winProb = dir === 'up' ? techProb : 1 - techProb;
-    evRoiPct = (winProb * (1 - cost) / cost - (1 - winProb)) * 100;
-    edge = winProb - cost;
-    if (action === '买Up' || action === '买Down') {
-      reasons.push(
-        `买入价值：${(cost * 100).toFixed(0)}¢/份 → 命中ROI +${potentialRoiPct.toFixed(0)}%，未中-100%；按技术面胜率${(winProb * 100).toFixed(0)}%计算期望ROI ${evRoiPct >= 0 ? '+' : ''}${evRoiPct.toFixed(0)}%`
-      );
-      if (evRoiPct < 5) {
-        action = '期望ROI不足，观望';
-        reasons.push('技术面胜率相对当前价格无期望优势（期望ROI<5%），放弃本期');
+  let decided = false;
+
+  if (wantDecide) {
+    if (ask === null) {
+      action = '订单簿无卖单，无法成交';
+      reasons.push('目标方向订单簿缺少卖一价');
+    } else if (ask > MAX_ENTRY_COST) {
+      action = `筹码已失真（${(ask * 100).toFixed(0)}¢>72¢），放弃本期`;
+      reasons.push('真实买价过高，命中ROI太低不值得参与——下期争取更早出手');
+    } else {
+      cost = ask;
+      potentialRoiPct = ((1 - cost) / cost) * 100;
+      const winProb = dir === 'up' ? techProb : 1 - techProb;
+      evRoiPct = ((winProb * (1 - cost)) / cost - (1 - winProb)) * 100;
+      edge = winProb - cost;
+      if (evRoiPct >= 8) {
+        action = dir === 'up' ? '买Up' : '买Down';
+        decided = true;
+        reasons.push(
+          `真实成本${(cost * 100).toFixed(0)}¢/份（卖一实价）→ 命中ROI +${potentialRoiPct.toFixed(0)}%，未中-100%；技术面胜率${(winProb * 100).toFixed(0)}% → 期望ROI ${evRoiPct >= 0 ? '+' : ''}${evRoiPct.toFixed(0)}%`
+        );
+      } else {
+        action = '期望ROI不足8%，继续侦察';
+        reasons.push(`按真实价${(cost * 100).toFixed(0)}¢计算期望ROI仅${evRoiPct.toFixed(0)}%，不出手`);
       }
     }
   }
 
-  return { action, edge, techProb, conf, cost, potentialRoiPct, evRoiPct, reasons };
+  return { action, edge, techProb, conf, cost, potentialRoiPct, evRoiPct, reasons, reversalAlert, decided };
 }

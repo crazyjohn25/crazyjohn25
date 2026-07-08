@@ -28,6 +28,7 @@ import {
   currentWindowStart,
   fetchWindowMarket,
   fetchBook,
+  fetchRealPrices,
   fetchTrades,
   analyzeBook,
   analyzeTrades,
@@ -55,6 +56,10 @@ import {
 import { getCompany } from './companies.js';
 import { runBacktest } from './backtest.js';
 import { PmHistory, pmDeepStats, pmReflections } from './pmstats.js';
+import { KOLS, fetchKolSignals } from './radar.js';
+
+/** 版本号：与 data/version.json 同步，旧部署会被远端更高版本强制引导到最新地址 */
+const APP_VERSION = 10;
 
 const $ = (id) => document.getElementById(id);
 
@@ -94,10 +99,30 @@ const pm = {
   advice: null,
   flow: null,
   bookInfo: null,
+  real: null, // 双边真实买价 { upAsk, downAsk, spreadCents }
   candles1m: [], // 独立的BTC 1分钟K线缓存
+  tickBuffer: [], // 实时价格缓存 [{t, price}]，用于30秒动能
   priceLine: null,
-  lastRecordWindow: null,
+  lockedWindow: null,
+  lockedAdvice: null,
+  passRecorded: null, // 已登记"放弃"的窗口
+  reversalAlerted: null, // 已发反转警报的窗口
 };
+
+/** 实时BTC价格（币安ticker，失败回退1分钟K线收盘） */
+async function fetchBtcTick() {
+  try {
+    const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
+    if (res.ok) {
+      const d = await res.json();
+      const p = parseFloat(d.price);
+      if (p > 0) return p;
+    }
+  } catch (_) {
+    /* fallthrough */
+  }
+  return pm.candles1m.length ? pm.candles1m[pm.candles1m.length - 1].close : null;
+}
 
 // ---------------- 图表初始化 ----------------
 
@@ -343,9 +368,10 @@ function recomputeAndRender({ fitContent }) {
   renderAnomalyList();
   renderEventList();
 
+  // 只播报强度≥3的高确定性信号（低强度信号仅在列表展示，不打扰）
   const lastTime = candles[candles.length - 1].time;
   alerts.check(
-    state.signals.filter((s) => s.time < lastTime),
+    state.signals.filter((s) => s.time < lastTime && s.score >= 3),
     state.symbol
   );
 
@@ -925,102 +951,114 @@ async function refreshPolymarket() {
       if (startBar) pm.strike = startBar.open;
     }
 
-    // 订单簿 + 成交流
-    const [book, trades] = await Promise.all([
-      pm.window.upTokenId ? fetchBook(pm.window.upTokenId) : null,
+    // 订单簿（双边真实买价）+ 成交流 + 实时tick
+    const [real, trades, tick] = await Promise.all([
+      fetchRealPrices(pm.window.upTokenId, pm.window.downTokenId),
       pm.window.conditionId ? fetchTrades(pm.window.conditionId, 100) : [],
+      fetchBtcTick(),
     ]);
-    pm.bookInfo = book ? analyzeBook(book) : null;
-    // 只统计本窗口内的成交
+    pm.real = real;
+    pm.bookInfo = real && real.upBook ? analyzeBook(real.upBook) : null;
     pm.flow = analyzeTrades(trades.filter((t) => Number(t.timestamp) >= winStart));
+    if (tick) {
+      const nowT = Math.floor(Date.now() / 1000);
+      pm.tickBuffer.push({ t: nowT, price: tick });
+      while (pm.tickBuffer.length > 80) pm.tickBuffer.shift(); // ~20分钟
+    }
 
     const secondsLeft = Math.max(0, pm.window.endSec - Math.floor(Date.now() / 1000));
+    const nowSec = Math.floor(Date.now() / 1000);
 
-    // ===== 每期只给一次建议：剩余≤150秒时一次性决策并锁定 =====
+    // ===== 每期一次决策：从开盘就侦察，信号充分立即出手（越早筹码越便宜） =====
     if (pm.lockedWindow === winStart) {
-      pm.advice = pm.lockedAdvice; // 已锁定，本期不再改口
-    } else if (secondsLeft <= 150 && secondsLeft >= 25) {
-      pm.advice = advise5m({
+      pm.advice = pm.lockedAdvice; // 已决策，本期不改口
+    } else {
+      const scouting = advise5m({
         candles1m: pm.candles1m,
+        tickBuffer: pm.tickBuffer,
         strikePrice: pm.strike,
-        upPrice: pm.window.upPrice,
+        upAsk: real ? real.upAsk : null,
+        downAsk: real ? real.downAsk : null,
         flow: pm.flow,
         book: pm.bookInfo,
         secondsLeft,
       });
-      pm.lockedWindow = winStart;
-      pm.lockedAdvice = pm.advice;
+      pm.advice = scouting;
 
-      // 锁定时点登记历史快照（每窗口唯一）
-      if (pm.strike && pm.candles1m.length) {
-        const cur = pm.candles1m[pm.candles1m.length - 1].close;
+      // 规则2：反转警报（每窗口一次）
+      if (scouting.reversalAlert && pm.reversalAlerted !== winStart) {
+        pm.reversalAlerted = winStart;
+        alerts.fireRisk({
+          key: `pmreversal|${winStart}`,
+          title: 'PM 5分钟 ⚠ 潜在反转警报',
+          body: scouting.reasons.find((r) => r.includes('反转警报')) || '价格大幅领先但双边筹码接近，市场押注反转',
+          kind: 'risk',
+        });
+      }
+
+      const recordSnapshot = (advice, secLeft) => {
+        if (!pm.strike || !pm.candles1m.length) return;
+        const cur = pm.tickBuffer.length ? pm.tickBuffer[pm.tickBuffer.length - 1].price : pm.candles1m[pm.candles1m.length - 1].close;
         pmHistory.record({
           winStart,
           winEnd: pm.window.endSec,
-          action: pm.advice.action,
-          edge: pm.advice.edge,
-          techProb: pm.advice.techProb,
-          cost: pm.advice.cost,
-          potentialRoiPct: pm.advice.potentialRoiPct,
-          evRoiPct: pm.advice.evRoiPct,
+          action: advice.action,
+          edge: advice.edge,
+          techProb: advice.techProb,
+          cost: advice.cost,
+          potentialRoiPct: advice.potentialRoiPct,
+          evRoiPct: advice.evRoiPct,
           strike: pm.strike,
           priceAtCall: cur,
-          secondsLeftAtCall: secondsLeft,
+          secondsLeftAtCall: secLeft,
           leadPct: ((cur - pm.strike) / pm.strike) * 100,
           flowBias:
             pm.flow && pm.flow.upFlow + pm.flow.downFlow > 0
               ? pm.flow.netUpFlow / (pm.flow.upFlow + pm.flow.downFlow)
               : null,
           bookImbalance: pm.bookInfo ? pm.bookInfo.imbalance : null,
-          upPrice: pm.window.upPrice,
-          reasons: pm.advice.reasons,
+          upPrice: real && real.upAsk !== null ? real.upAsk : pm.window.upPrice,
+          reasons: advice.reasons,
         });
-      }
+      };
 
-      if (pm.advice.action === '买Up' || pm.advice.action === '买Down') {
-        // 复盘登记
+      if (scouting.decided) {
+        // 一次性锁定
+        pm.lockedWindow = winStart;
+        pm.lockedAdvice = scouting;
+        recordSnapshot(scouting, secondsLeft);
         reviewLog.record({
           source: 'polymarket:5m',
           symbol: 'BTCUSDT',
-          direction: pm.advice.action === '买Up' ? 'up' : 'down',
-          priceAtCall: pm.strike ?? pm.candles1m[pm.candles1m.length - 1].close,
-          callTime: Math.floor(Date.now() / 1000),
+          direction: scouting.action === '买Up' ? 'up' : 'down',
+          priceAtCall: pm.strike,
+          callTime: nowSec,
           evalTime: pm.window.endSec,
-          note: `本期唯一决策`,
+          note: `唯一决策@剩余${secondsLeft}s`,
         });
-        // 提示音
         alerts.fireRisk({
-          key: `pmcall|${winStart}|${pm.advice.action}`,
-          title: `Polymarket 5分钟信号：${pm.advice.action}（本期唯一建议）`,
-          body: `置信度${(pm.advice.conf * 100).toFixed(0)}% · 成本${pm.advice.cost !== null ? (pm.advice.cost * 100).toFixed(0) + '¢' : '-'} · 期望ROI ${pm.advice.evRoiPct !== null ? (pm.advice.evRoiPct >= 0 ? '+' : '') + pm.advice.evRoiPct.toFixed(0) + '%' : '-'}`,
-          kind: pm.advice.action === '买Up' ? 'buy' : 'sell',
+          key: `pmcall|${winStart}|${scouting.action}`,
+          title: `Polymarket 5分钟信号：${scouting.action}（本期唯一决策·剩余${secondsLeft}秒）`,
+          body: `真实成本${(scouting.cost * 100).toFixed(0)}¢ · 命中ROI +${scouting.potentialRoiPct.toFixed(0)}% · 期望ROI ${scouting.evRoiPct >= 0 ? '+' : ''}${scouting.evRoiPct.toFixed(0)}%`,
+          kind: scouting.action === '买Up' ? 'buy' : 'sell',
         });
-        // 模拟钱包按置信度下注 $50-100
-        if (pm.advice.cost !== null && pm.advice.evRoiPct !== null && pm.advice.evRoiPct >= 10) {
-          const stake = pm.advice.conf >= 0.6 ? 100 : pm.advice.conf >= 0.4 ? 75 : 50;
+        if (scouting.evRoiPct >= 10) {
+          const stake = scouting.conf >= 0.6 ? 100 : scouting.conf >= 0.4 ? 75 : 50;
           wallet.placePmBet({
             winStart,
-            side: pm.advice.action === '买Up' ? 'up' : 'down',
-            cost: pm.advice.cost,
+            side: scouting.action === '买Up' ? 'up' : 'down',
+            cost: scouting.cost, // 真实卖一价
             stake,
-            time: Math.floor(Date.now() / 1000),
-            reason: `置信度${(pm.advice.conf * 100).toFixed(0)}%·期望ROI+${pm.advice.evRoiPct.toFixed(0)}%`,
+            time: nowSec,
+            reason: `置信度${(scouting.conf * 100).toFixed(0)}%·真实价${(scouting.cost * 100).toFixed(0)}¢·期望ROI+${scouting.evRoiPct.toFixed(0)}%`,
           });
           renderWalletTab();
         }
+      } else if (secondsLeft < 20 && pm.passRecorded !== winStart) {
+        // 全程未出手：登记一次"放弃"供复盘
+        pm.passRecorded = winStart;
+        recordSnapshot({ ...scouting, action: '本期未出手（信号/价格条件未满足）' }, secondsLeft);
       }
-    } else if (secondsLeft > 150) {
-      pm.advice = {
-        action: '等待盘尾统一决策（剩余2.5分钟时一次性给出本期唯一建议）',
-        conf: 0, cost: null, potentialRoiPct: null, evRoiPct: null, edge: 0, techProb: null,
-        reasons: ['纪律：每期只做一次决策，不中途改口', '决策点：剩余150秒时综合K线动能/量能/订单簿/大单一次性判断'],
-      };
-    } else {
-      pm.advice = {
-        action: '本期未在决策窗口出手，等待下一期',
-        conf: 0, cost: null, potentialRoiPct: null, evRoiPct: null, edge: 0, techProb: null,
-        reasons: ['本期决策窗口已错过（页面可能刚打开或数据延迟），下期将正常决策'],
-      };
     }
     settlePmHistory();
 
@@ -1151,12 +1189,14 @@ function renderPmPanel(secondsLeft) {
         `</div>`
       : '';
 
+  const upShow = pm.real && pm.real.upAsk !== null ? pm.real.upAsk : w.upPrice;
+  const downShow = pm.real && pm.real.downAsk !== null ? pm.real.downAsk : w.downPrice;
   setHtmlIfChanged(
     $('pmBox'),
     `<div class="pm-q">${escapeHtml(w.question)} · <a href="${escapeHtml(w.url)}" target="_blank" rel="noopener noreferrer">开市场↗</a></div>` +
       `<div class="pm-odds">` +
-      `<div class="pm-odd up">${w.upPrice !== null ? (w.upPrice * 100).toFixed(0) + '¢' : '-'}<small>Up 隐含概率</small></div>` +
-      `<div class="pm-odd down">${w.downPrice !== null ? (w.downPrice * 100).toFixed(0) + '¢' : '-'}<small>Down 隐含概率</small></div>` +
+      `<div class="pm-odd up">${upShow !== null ? (upShow * 100).toFixed(0) + '¢' : '-'}<small>Up 真实买价(卖一)</small></div>` +
+      `<div class="pm-odd down">${downShow !== null ? (downShow * 100).toFixed(0) + '¢' : '-'}<small>Down 真实买价(卖一)</small></div>` +
       `</div>` +
       (pm.strike
         ? `<div class="pm-strike">🎯 目标价 ${pm.strike.toFixed(1)}（已画到K线图，币安1m开盘价近似Chainlink）</div>`
@@ -1426,12 +1466,14 @@ function considerAutoTrades() {
   for (const st of adv.strategies) {
     if (!st.major || !st.plan) continue; // 只做多周期高度共振的重大信号
     if (st.plan.rr !== null && st.plan.rr < 1) continue; // 盈亏比<1不做，风险回报不对称
+    // 杠杆按置信度在20-100x间分档（评分2.5→20x，3.5→50x，4.5→80x）
+    const lev = Math.max(20, Math.min(100, Math.round(20 + (Math.abs(st.score) - 2.5) * 30)));
     const res = wallet.openPosition({
       symbol: state.symbol,
       side: st.plan.direction,
       price,
-      margin: 150,
-      leverage: st.leverage,
+      margin: 500,
+      leverage: lev,
       stop: st.plan.stop,
       target: st.plan.target,
       reason: `${st.label} ${st.action}（评分${st.score.toFixed(1)}）${state.usingMock ? '·模拟行情' : ''}`,
@@ -1441,8 +1483,8 @@ function considerAutoTrades() {
     if (res && !res.rejected) {
       alerts.fireRisk({
         key: `walletopen|${res.id}`,
-        title: `模拟钱包开仓：${getSymbol(state.symbol).label} ${st.plan.direction === 'long' ? '做多' : '做空'} ${st.leverage}x`,
-        body: `保证金$150 · 入场${price.toFixed(1)} · 止损${st.plan.stop.toFixed(1)} · 目标${st.plan.target.toFixed(1)}`,
+        title: `模拟钱包开仓：${getSymbol(state.symbol).label} ${st.plan.direction === 'long' ? '做多' : '做空'} ${lev}x`,
+        body: `保证金$500 · 入场${price.toFixed(1)} · 止损${st.plan.stop.toFixed(1)} · 目标${st.plan.target.toFixed(1)}`,
         kind: st.plan.direction === 'long' ? 'buy' : 'sell',
       });
       renderWalletTab();
@@ -1541,8 +1583,9 @@ function renderWalletTab() {
     (state.usingMock
       ? `<div class="rv-reflect" style="margin-top:6px">⚠ 当前为离线模拟行情，自动交易已暂停（避免虚假价差污染绩效）；连接真实行情后自动恢复。</div>`
       : '') +
-    `<div class="rv-reflect" style="margin-top:6px">规则：初始$1000合约+$1000 PM · 单笔保证金$100-200 · 杠杆2-10x（短线5x/中短3x/长线2x） · ` +
-    `taker手续费0.05%/边 · 亏损95%强平 · 只做重大共振信号 · 同品种同策略6小时冷却 · 最多3仓 · PM每期唯一决策$50-100</div>`;
+    `<div class="rv-reflect" style="margin-top:6px">规则：初始$10000合约+$1000 PM（可手动注资） · 单笔保证金$500-1000 · 杠杆20-100x按信号强度分档 · ` +
+    `taker手续费0.05%/边 · 亏损95%强平（50x下反向1.9%即强平，止损严格执行） · 覆盖全部交易对（当前品种策略信号+其他品种强度≥4信号） · ` +
+    `同品种同策略6小时冷却 · 最多3仓 · PM每期唯一决策$50-100按真实卖一价</div>`;
 }
 
 /** 每小时权益快照 */
@@ -1573,12 +1616,44 @@ async function watchAllSymbols() {
         const lastClosed = candles[candles.length - 2]?.time;
         const s = signals[signals.length - 1];
         if (s.time !== lastClosed) continue; // 只报最新收盘K线上的信号
+        if (s.score < 3) continue; // 强度≥3才播报
         alerts.fireRisk({
           key: `watch|${sym.id}|${s.time}|${s.side}`,
           title: `${sym.label} ${s.side === 'buy' ? '买入' : '卖出'}信号（强度${s.score}）`,
           body: s.reasons.join('；'),
           kind: s.side,
         });
+        // 其他交易对强信号（≥4）自动开仓：全品种参与
+        if (s.score >= 4 && !state.usingMock) {
+          const atrArr = ind.atr;
+          const atrV = atrArr[atrArr.length - 1] ?? atrArr[atrArr.length - 2];
+          if (atrV) {
+            const entry = candles[candles.length - 1].close;
+            const long = s.side === 'buy';
+            const lev = Math.max(20, Math.min(100, Math.round(20 + (s.score - 4) * 20)));
+            const res = wallet.openPosition({
+              symbol: sym.id,
+              side: long ? 'long' : 'short',
+              price: entry,
+              margin: 500,
+              leverage: lev,
+              stop: long ? entry - 1.5 * atrV : entry + 1.5 * atrV,
+              target: long ? entry + 2.5 * atrV : entry - 2.5 * atrV,
+              reason: `全品种监控 强度${s.score}信号：${s.reasons.slice(0, 2).join('；')}`,
+              time: Math.floor(Date.now() / 1000),
+              strategy: 'watch',
+            });
+            if (res && !res.rejected) {
+              alerts.fireRisk({
+                key: `walletopen|${res.id}`,
+                title: `模拟钱包开仓：${sym.label} ${long ? '做多' : '做空'} ${lev}x`,
+                body: `保证金$500 · 入场${entry.toFixed(2)}`,
+                kind: long ? 'buy' : 'sell',
+              });
+              renderWalletTab();
+            }
+          }
+        }
       } catch (_) {
         /* 单品种失败不影响其他 */
       }
@@ -1696,9 +1771,25 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
 
 $('backtestRun').addEventListener('click', runBacktestPanel);
 
+$('newsRefresh').addEventListener('click', refreshNews);
+
+$('walletAddSpot').addEventListener('click', () => {
+  const amt = prompt('增加多少合约虚拟资本（美元）？', '5000');
+  if (amt === null) return;
+  if (wallet.addFunds(amt, 'spot')) renderWalletTab();
+  else alert('金额无效（需为0-1,000,000之间的数字）');
+});
+
+$('walletAddPm').addEventListener('click', () => {
+  const amt = prompt('增加多少PM虚拟资本（美元）？', '1000');
+  if (amt === null) return;
+  if (wallet.addFunds(amt, 'pm')) renderWalletTab();
+  else alert('金额无效（需为0-1,000,000之间的数字）');
+});
+
 $('walletReset').addEventListener('click', () => {
   if (!confirm('确认重置模拟钱包？将清空全部持仓、注单与收益记录。')) return;
-  wallet.cash = 1000;
+  wallet.cash = 10000;
   wallet.pmCash = 1000;
   wallet.positions = [];
   wallet.closed = [];
@@ -1715,13 +1806,44 @@ $('walletReset').addEventListener('click', () => {
 
 async function refreshNews() {
   const base = getSymbol(state.symbol).base;
+  const statusEl = $('newsRefreshStatus');
+  if (statusEl) statusEl.textContent = '刷新中…';
   try {
     state.newsEvents = await fetchNews(base);
+    if (statusEl) statusEl.textContent = `已刷新 ${formatTime(Math.floor(Date.now() / 1000))} · 共${state.newsEvents.length}条（3天内）`;
   } catch (_) {
     state.newsEvents = [];
+    if (statusEl) statusEl.textContent = '刷新失败，将自动重试';
   }
   renderMarkers();
   renderEventList();
+}
+
+// ---------------- KOL信号雷达 ----------------
+
+async function refreshKolRadar() {
+  const box = $('kolBox');
+  if (!box) return;
+  const items = await fetchKolSignals();
+  const listHtml = items.length
+    ? items
+        .map(
+          (x) =>
+            `<div class="kol-item"><span class="bias ${x.bias}">${x.bias === 'bullish' ? '看多' : x.bias === 'bearish' ? '看空' : '中性'}</span>` +
+            `<span class="kol-name">${escapeHtml(x.kol)}</span>` +
+            `<a href="${escapeHtml(x.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(x.title)}</a>` +
+            `<br><span class="time">${formatTime(x.time)} · <a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--muted)">${escapeHtml(x.handle)}</a></span></div>`
+        )
+        .join('')
+    : '<div class="advisor-loading">暂无近期公开信号（或网络受限）</div>';
+
+  const kolListHtml =
+    `<details class="kol-list-note"><summary class="tf-head"><span class="tf-name">监控清单（10位）与说明</span></summary>` +
+    `<div class="sy-note">${KOLS.map((k) => `${escapeHtml(k.name)}（${escapeHtml(k.handle)}·${escapeHtml(k.style)}）`).join('；')}</div>` +
+    `<div class="sy-note" style="margin-top:4px">说明：X/Telegram的API需付费Key，本雷达通过公开新闻聚合捕捉这些KOL被报道/转载的最新观点，仅覆盖公开内容；` +
+    `可自建代理接入实时推文（js/radar.js 的 fetchLiveSignals 钩子）。KOL观点不构成投资建议。</div></details>`;
+
+  setHtmlIfChanged(box, listHtml + kolListHtml);
 }
 
 // ---------------- 交互绑定 ----------------
@@ -1781,6 +1903,26 @@ loadSymbol();
 setInterval(refreshAdvisorAndVolume, 30 * 60 * 1000);
 // 新闻：每5分钟刷新
 setInterval(refreshNews, 5 * 60 * 1000);
+// KOL信号雷达：立即 + 每10分钟（24小时不间断）
+refreshKolRadar();
+setInterval(refreshKolRadar, 10 * 60 * 1000);
+
+// 版本门：旧部署强制引导到最新地址
+(async () => {
+  try {
+    const res = await fetch(
+      `https://raw.githubusercontent.com/crazyjohn25/crazyjohn25/cursor/tradingview-macro-signals-bd5c/data/version.json?t=${Date.now()}`
+    );
+    if (res.ok) {
+      const remote = await res.json();
+      if (remote && typeof remote.v === 'number' && remote.v > APP_VERSION) {
+        $('versionGate').classList.remove('hidden');
+      }
+    }
+  } catch (_) {
+    /* 网络受限时不阻塞使用 */
+  }
+})();
 // Polymarket 5m：每15秒刷新行情与建议；1分钟K线缓存每60秒刷新
 setInterval(refreshPolymarket, 15 * 1000);
 setInterval(refreshPm1mCandles, 60 * 1000);

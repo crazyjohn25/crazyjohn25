@@ -18,9 +18,9 @@ export const TF_WEIGHTS = { '15m': 1, '30m': 1.5, '1h': 2, '4h': 3 };
  * 每层输出独立的行动建议、交易计划、置信度；重大信号(major)置顶并触发提示音。
  */
 export const STRATEGIES = [
-  { key: 'short', label: '短线策略（1-6小时）', tf: '1h', filterTf: '4h', holdSec: 4 * 3600, leverage: 5, stopAtr: 1.2, targetAtr: 2.0 },
-  { key: 'mid', label: '中短线策略（6-24小时）', tf: '4h', filterTf: '1d', holdSec: 12 * 3600, leverage: 3, stopAtr: 1.8, targetAtr: 3.0 },
-  { key: 'long', label: '长线策略（1-3天）', tf: '1d', filterTf: null, holdSec: 48 * 3600, leverage: 2, stopAtr: 2.5, targetAtr: 4.0 },
+  { key: 'short', label: '短线策略（1-6小时）', tf: '1h', filterTf: '4h', holdSec: 4 * 3600, leverage: 50, stopAtr: 1.2, targetAtr: 2.0 },
+  { key: 'mid', label: '中短线策略（6-24小时）', tf: '4h', filterTf: '1d', holdSec: 12 * 3600, leverage: 30, stopAtr: 1.8, targetAtr: 3.0 },
+  { key: 'long', label: '长线策略（1-3天）', tf: '1d', filterTf: null, holdSec: 48 * 3600, leverage: 20, stopAtr: 2.5, targetAtr: 4.0 },
 ];
 export const STRATEGY_TFS = ['1h', '4h', '1d'];
 
