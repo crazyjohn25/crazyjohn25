@@ -56,7 +56,7 @@ function parseYahooChart(data) {
   return out.length ? out : null;
 }
 
-async function tryFetchJson(url, timeoutMs = 12000) {
+async function tryFetchJson(url, timeoutMs = 4000) {
   const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
   try {
@@ -101,17 +101,34 @@ function snapshotCandles(snapshot, ticker) {
   }));
 }
 
+/** 通道健康缓存：失败的通道5分钟内跳过，成功的优先 */
+const channelHealth = new Map(); // idx -> { ok, until }
+
+function channelUsable(idx) {
+  const h = channelHealth.get(idx);
+  if (!h) return true;
+  if (h.ok) return true;
+  return Date.now() > h.until;
+}
+
+function markChannel(idx, ok) {
+  channelHealth.set(idx, { ok, until: Date.now() + (ok ? 0 : 5 * 60 * 1000) });
+}
+
 /**
- * 拉取股票K线：直连 -> 代理链 -> 内置快照（仅日线）
+ * 拉取股票K线：直连 -> 代理链（带健康缓存）-> 内置快照（仅日线）
  * @returns {{candles, source: 'live'|'snapshot'}}
  */
 export async function fetchStockHistory(ticker, interval = '1d', limit = 400) {
   const conf = YAHOO_INTERVALS[interval] || YAHOO_INTERVALS['1d'];
   const url = `${YAHOO}${encodeURIComponent(ticker)}?interval=${conf.iv}&range=${conf.range}`;
 
-  for (const build of [(u) => u, ...PROXIES]) {
-    const data = await tryFetchJson(build(url));
+  const channels = [(u) => u, ...PROXIES];
+  for (let i = 0; i < channels.length; i++) {
+    if (!channelUsable(i)) continue;
+    const data = await tryFetchJson(channels[i](url));
     let candles = data ? parseYahooChart(data) : null;
+    markChannel(i, Boolean(candles));
     if (candles) {
       if (conf.aggregate) candles = aggregate(candles, conf.aggregate);
       return { candles: candles.slice(-limit), source: 'live' };
@@ -125,14 +142,33 @@ export async function fetchStockHistory(ticker, interval = '1d', limit = 400) {
   throw new Error(`无法获取 ${ticker} 行情`);
 }
 
-/** 批量取多只股票的日线（Serenity指数用），失败的返回null */
-export async function fetchDailyBatch(tickers) {
+/** 从内置快照批量取日线（同步快、离线可用） */
+export async function snapshotBatch(tickers) {
+  const snapshot = await loadSnapshot();
   const out = {};
+  for (const t of tickers) {
+    const candles = snapshotCandles(snapshot, t);
+    out[t] = candles ? { candles, source: 'snapshot' } : null;
+  }
+  return out;
+}
+
+/**
+ * 尝试实时批量取日线（带总预算），拿不到的返回null
+ * @param {number} budgetMs 总时间预算，超时放弃剩余请求
+ */
+export async function fetchDailyBatch(tickers, budgetMs = 20000) {
+  const out = {};
+  const deadline = Date.now() + budgetMs;
   await Promise.all(
     tickers.map(async (t) => {
+      if (Date.now() > deadline) {
+        out[t] = null;
+        return;
+      }
       try {
         const { candles, source } = await fetchStockHistory(t, '1d', 90);
-        out[t] = { candles, source };
+        out[t] = source === 'live' ? { candles, source } : null; // 只要live，快照由snapshotBatch负责
       } catch (_) {
         out[t] = null;
       }

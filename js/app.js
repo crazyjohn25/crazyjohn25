@@ -42,9 +42,8 @@ import {
   buildSerenityIndex,
   scorePick,
 } from './serenity.js';
-import { fetchDailyBatch } from './stocks.js';
+import { fetchDailyBatch, snapshotBatch } from './stocks.js';
 import { PmHistory, pmDeepStats, pmReflections } from './pmstats.js';
-import { lastStockSource } from './datafeed.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -1061,13 +1060,25 @@ async function refreshSerenity() {
   serenityLoaded = true;
 
   const tickers = [...new Set(SERENITY_PICKS.map((p) => p.ticker))];
-  let daily = {};
-  try {
-    daily = await fetchDailyBatch(tickers);
-  } catch (_) {
-    /* 全部失败时 daily 为空，下面各自降级 */
-  }
 
+  // 先用内置快照秒开渲染，再在后台尝试实时数据并覆盖
+  const snap = await snapshotBatch(tickers);
+  renderSerenity(snap, 'snapshot');
+
+  try {
+    const live = await fetchDailyBatch(tickers);
+    const liveCount = Object.values(live).filter(Boolean).length;
+    if (liveCount >= tickers.length / 2) {
+      // 实时数据过半才切换；缺的用快照补齐
+      for (const t of tickers) if (!live[t]) live[t] = snap[t];
+      renderSerenity(live, 'live');
+    }
+  } catch (_) {
+    /* 保持快照渲染 */
+  }
+}
+
+function renderSerenity(daily, mode) {
   // 指数
   const idx = buildSerenityIndex(daily);
   const idxBox = $('serenityIndexBox');
@@ -1081,7 +1092,7 @@ async function refreshSerenity() {
       `<span class="sy-idx ${cls}">${idx.current.toFixed(2)}</span> ` +
       `<span class="rv-rate ${cls === 'up' ? 'good' : 'bad'}">${idx.changePct >= 0 ? '+' : ''}${idx.changePct.toFixed(2)}% / 30天</span>` +
       `<div class="sy-note">覆盖${idx.covered}/${idx.total}只成分 · 等权重 · 基期=100` +
-      `${lastStockSource === 'snapshot' ? ' · 快照数据（实时源不可达）' : ''}</div>` +
+      `${mode === 'snapshot' ? ' · 内置快照数据' : ' · 实时数据'}</div>` +
       `<div class="sy-note">走势：${spark}</div>`;
   } else {
     idxBox.innerHTML = '<div class="advisor-loading">行情不可用，无法合成指数</div>';
