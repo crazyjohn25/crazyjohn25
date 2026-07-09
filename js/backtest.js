@@ -8,13 +8,16 @@
  */
 import { analyzeTimeframe } from './advisor.js';
 
-/** 各持有周期采用的基础K线与提前根数 */
+/** 各持有周期采用的基础K线与提前根数；leverage与模拟钱包分档一致，用于ROI核算 */
 export const HORIZONS = [
-  { key: '30m', label: '30分钟', base: '5m', ahead: 6, seconds: 1800 },
-  { key: '2h', label: '2小时', base: '15m', ahead: 8, seconds: 7200 },
-  { key: '4h', label: '4小时', base: '30m', ahead: 8, seconds: 14400 },
-  { key: '12h', label: '12小时', base: '1h', ahead: 12, seconds: 43200 },
+  { key: '30m', label: '30分钟', base: '5m', ahead: 6, seconds: 1800, leverage: 50 },
+  { key: '2h', label: '2小时', base: '15m', ahead: 8, seconds: 7200, leverage: 40 },
+  { key: '4h', label: '4小时', base: '30m', ahead: 8, seconds: 14400, leverage: 30 },
+  { key: '12h', label: '12小时', base: '1h', ahead: 12, seconds: 43200, leverage: 20 },
 ];
+
+/** taker手续费0.05%/边，双边合计0.1%名义价值 */
+const FEE_PCT_ROUNDTRIP = 0.1;
 
 const WINDOW = 220; // 指标滚动窗口（覆盖EMA200）
 const SCORE_TH = 0.75; // 与实时建议一致的方向阈值
@@ -43,9 +46,13 @@ export function backtestHorizon(candles, h) {
     const exit = candles[i + h.ahead].close;
     const changePct = ((exit - entry) / entry) * 100;
     const hit = direction === 'up' ? changePct > 0 : changePct < 0;
-    const ret = direction === 'up' ? changePct : -changePct; // 跟随建议方向的收益
+    const ret = direction === 'up' ? changePct : -changePct; // 跟随建议方向的现货收益%
+    // 保证金ROI：杠杆×(方向收益% - 双边手续费0.1%)。按收盘价复算，未含爆仓路径模拟
+    const roiPct = h.leverage * (ret - FEE_PCT_ROUNDTRIP);
 
     calls.push({
+      horizon: h.key,
+      horizonLabel: h.label,
       time: candles[i].time,
       exitTime: candles[i + h.ahead].time,
       direction,
@@ -53,8 +60,10 @@ export function backtestHorizon(candles, h) {
       verdict: r.verdict,
       entry,
       exit,
+      leverage: h.leverage,
       changePct,
       ret,
+      roiPct,
       hit,
       reasons: r.reasons.slice(0, 5),
     });
@@ -62,25 +71,24 @@ export function backtestHorizon(candles, h) {
 
   const hits = calls.filter((c) => c.hit).length;
   const pnl = calls.reduce((s, c) => s + c.ret, 0);
-  // 复利累计（每次按固定仓位跟随）
+  // 现货口径复利累计
   let cum = 1;
   for (const c of calls) cum *= 1 + c.ret / 100;
-
-  // 代表性案例：最赚的对、最亏的错各取若干
-  const wins = calls.filter((c) => c.hit).sort((a, b) => b.ret - a.ret).slice(0, 2);
-  const losses = calls.filter((c) => !c.hit).sort((a, b) => a.ret - b.ret).slice(0, 3);
+  // 杠杆ROI累计（每笔独立保证金，简单加总）
+  const roiSum = calls.reduce((s, c) => s + c.roiPct, 0);
 
   return {
     key: h.key,
     label: h.label,
+    leverage: h.leverage,
     total: calls.length,
     hits,
     hitRate: calls.length ? hits / calls.length : null,
     pnl,
     cum: (cum - 1) * 100,
+    roiSum,
     longs: calls.filter((c) => c.direction === 'up').length,
     shorts: calls.filter((c) => c.direction === 'down').length,
-    cases: { wins, losses },
     calls,
   };
 }
@@ -102,8 +110,14 @@ export async function runBacktest(fetchCandles) {
       results.push({ key: h.key, label: h.label, total: 0, hitRate: null, error: true, calls: [] });
     }
   }
+  // 全部交易按进场时间升序合并（历史往期逐笔明细）
+  const allCalls = results
+    .flatMap((r) => r.calls || [])
+    .sort((a, b) => a.time - b.time);
+
   return {
     horizons: results,
+    allCalls,
     reflections: reflectBacktest(results),
     generatedAt: Math.floor(Date.now() / 1000),
   };

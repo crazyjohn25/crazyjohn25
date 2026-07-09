@@ -59,13 +59,15 @@ import { PmHistory, pmDeepStats, pmReflections } from './pmstats.js';
 import { KOLS, fetchKolSignals } from './radar.js';
 
 /** 版本号：与 data/version.json 同步，旧部署会被远端更高版本强制引导到最新地址 */
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 
 const $ = (id) => document.getElementById(id);
 
 const SUB_LABELS = {
   rsi: 'RSI(14) — 相对强弱指标',
   kdj: 'KDJ(9,3,3) — 随机指标',
+  stoch: '平滑STOCH(14,6,6) — 圆弧随机指标（截图同款）',
+  wae: 'WAE动能爆发 — 动量柱vs爆发线（截图同款）',
   dmi: 'DMI(14) — 动向指标（+DI/-DI/ADX）',
   obv: 'OBV — 能量潮（累计成交量）',
 };
@@ -170,6 +172,11 @@ const candleSeries = mainChart.addCandlestickSeries({
 const bollUpper = mainChart.addLineSeries({ color: 'rgba(77,148,255,.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 const bollMiddle = mainChart.addLineSeries({ color: 'rgba(230,184,0,.8)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
 const bollLower = mainChart.addLineSeries({ color: 'rgba(77,148,255,.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+
+// 均线彩带（参考截图：黄快线/蓝中线/红慢线加粗）
+const emaFastLine = mainChart.addLineSeries({ color: '#ffd54a', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+const emaMidLine = mainChart.addLineSeries({ color: '#4d94ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+const emaSlowLine = mainChart.addLineSeries({ color: '#e05252', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
 
 // 主图底部叠加成交量柱
 const volumeSeries = mainChart.addHistogramSeries({
@@ -346,6 +353,10 @@ function recomputeAndRender({ fitContent }) {
   bollMiddle.setData(toLine(boll.middle));
   bollLower.setData(toLine(boll.lower));
 
+  emaFastLine.setData(toLine(state.indicators.ema10));
+  emaMidLine.setData(toLine(state.indicators.ema30));
+  emaSlowLine.setData(toLine(state.indicators.ema60));
+
   macdDif.setData(toLine(macd.dif));
   macdDea.setData(toLine(macd.dea));
   macdHist.setData(
@@ -385,6 +396,15 @@ const SUB_INDICATOR_LINES = {
     { color: '#4d94ff', pick: (ind) => ind.kdj.d },
     { color: '#ff7f2a', pick: (ind) => ind.kdj.j },
   ],
+  stoch: [
+    { color: '#4d94ff', width: 2, pick: (ind) => ind.stoch.k },
+    { color: '#e05252', pick: (ind) => ind.stoch.d },
+  ],
+  wae: [
+    // 动量柱：正绿负红；爆发线：黄
+    { type: 'hist', pick: (ind) => ind.wae.momentum },
+    { color: '#e6b800', pick: (ind) => ind.wae.explosion },
+  ],
   dmi: [
     { color: '#26a69a', pick: (ind) => ind.dmi.pdi },
     { color: '#ef5350', pick: (ind) => ind.dmi.mdi },
@@ -402,22 +422,43 @@ function renderSubIndicator() {
   if (subSeriesType !== state.subIndicator) {
     for (const s of subSeries) subChart.removeSeries(s);
     subSeries = lines.map((l) =>
-      subChart.addLineSeries({
-        color: l.color,
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-      })
+      l.type === 'hist'
+        ? subChart.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false })
+        : subChart.addLineSeries({
+            color: l.color,
+            lineWidth: l.width || 1,
+            priceLineVisible: false,
+            lastValueVisible: false,
+          })
     );
     subSeriesType = state.subIndicator;
     $('subLabel').textContent = SUB_LABELS[state.subIndicator];
   }
 
-  const toLine = (arr) =>
-    candles
-      .map((c, i) => (arr[i] !== null ? { time: c.time, value: arr[i] } : null))
-      .filter(Boolean);
-  lines.forEach((l, idx) => subSeries[idx].setData(toLine(l.pick(ind))));
+  lines.forEach((l, idx) => {
+    const arr = l.pick(ind);
+    if (l.type === 'hist') {
+      subSeries[idx].setData(
+        candles
+          .map((c, i) =>
+            arr[i] !== null
+              ? {
+                  time: c.time,
+                  value: Math.abs(arr[i]),
+                  color: arr[i] >= 0 ? 'rgba(38,166,154,.75)' : 'rgba(239,83,80,.75)',
+                }
+              : null
+          )
+          .filter(Boolean)
+      );
+    } else {
+      subSeries[idx].setData(
+        candles
+          .map((c, i) => (arr[i] !== null ? { time: c.time, value: arr[i] } : null))
+          .filter(Boolean)
+      );
+    }
+  });
 }
 
 // ---------------- 综合建议 + 成交量对比（每30分钟刷新） ----------------
@@ -514,6 +555,23 @@ function recordAdvisorPredictions() {
       note: st.action,
     });
   }
+
+  // 统一日度复盘：三层策略加权净倾向，24小时后验证（每天一条）
+  const valid = adv.strategies.filter((s) => s.action !== '数据不足');
+  if (valid.length) {
+    const avg = valid.reduce((s, x) => s + x.score, 0) / valid.length;
+    if (Math.abs(avg) >= 0.5) {
+      reviewLog.record({
+        source: 'advisor:daily',
+        symbol: state.symbol,
+        direction: avg > 0 ? 'up' : 'down',
+        priceAtCall: price,
+        callTime: now,
+        evalTime: now + 86400,
+        note: `日度综合（均分${avg.toFixed(1)}）`,
+      });
+    }
+  }
 }
 
 /** 重大信号：置顶 + 提示音推送 */
@@ -567,7 +625,7 @@ function renderReviewPanel() {
     return;
   }
 
-  const STRATEGY_NAMES = { short: '短线1-6h', mid: '中短线6-24h', long: '长线1-3天' };
+  const STRATEGY_NAMES = { short: '短线1-6h', mid: '中短线6-24h', long: '长线1-3天', daily: '综合·1天复盘' };
   const SRC_LABEL = (s) => {
     if (s.startsWith('advisor:')) {
       const k = s.split(':')[1];
@@ -772,6 +830,20 @@ function renderMarkers() {
         color: EVENT_CATEGORIES[evt.category].color,
         shape: evt.impact === 'high' ? 'circle' : 'square',
         text: evt.title.length > 12 ? evt.title.slice(0, 12) + '…' : evt.title,
+      });
+    }
+  }
+
+  // ZigZag摆动点标价（参考截图：在关键高低点标注价格）
+  const swingsToggle = $('toggleSwings');
+  if ((!swingsToggle || swingsToggle.checked) && state.indicators && state.indicators.swings) {
+    for (const sw of state.indicators.swings.slice(-14)) {
+      markers.push({
+        time: sw.time,
+        position: sw.type === 'high' ? 'aboveBar' : 'belowBar',
+        color: '#9aa4b5',
+        shape: sw.type === 'high' ? 'arrowDown' : 'arrowUp',
+        text: sw.price >= 1000 ? sw.price.toFixed(0) : sw.price.toFixed(2),
       });
     }
   }
@@ -1696,41 +1768,53 @@ async function runBacktestPanel() {
   const pct = (x) => (x !== null ? (x * 100).toFixed(0) + '%' : 'N/A');
 
   const table =
-    `<table class="sy-table"><thead><tr><th>周期</th><th>次数</th><th>命中率</th><th>累计收益</th><th>多/空</th></tr></thead><tbody>` +
+    `<table class="sy-table"><thead><tr><th>周期</th><th>杠杆</th><th>次数</th><th>命中率</th><th>现货累计</th><th>杠杆ROI合计</th></tr></thead><tbody>` +
     bt.horizons
       .map((h) => {
         if (!h.total)
-          return `<tr><td>${h.label}</td><td colspan="4" class="sy-note">${h.error ? '数据不可用' : '无有效样本'}</td></tr>`;
+          return `<tr><td>${h.label}</td><td colspan="5" class="sy-note">${h.error ? '数据不可用' : '无有效样本'}</td></tr>`;
         const cls = h.hitRate >= 0.55 ? 'up' : h.hitRate < 0.45 ? 'down' : '';
         const cumCls = h.cum >= 0 ? 'up' : 'down';
+        const roiCls = h.roiSum >= 0 ? 'up' : 'down';
         return (
-          `<tr><td><b>${h.label}</b></td><td>${h.total}</td>` +
+          `<tr><td><b>${h.label}</b></td><td>${h.leverage}x</td><td>${h.total}</td>` +
           `<td class="${cls}">${pct(h.hitRate)}</td>` +
           `<td class="${cumCls}">${h.cum >= 0 ? '+' : ''}${h.cum.toFixed(1)}%</td>` +
-          `<td>${h.longs}/${h.shorts}</td></tr>`
+          `<td class="${roiCls}">${h.roiSum >= 0 ? '+' : ''}${h.roiSum.toFixed(0)}%</td></tr>`
         );
       })
       .join('') +
     `</tbody></table>`;
 
-  // 每个周期的代表性正确/错误案例（含当时理由）
-  const caseHtml = bt.horizons
-    .filter((h) => h.total)
-    .map((h) => {
-      const caseLine = (c, ok) =>
-        `<details class="pm-hist-item"><summary><span class="${ok ? 'rv-hit' : 'rv-miss'}">${ok ? '✓正确' : '✗错误'}</span> ` +
-        `${formatTime(c.time)} ${c.direction === 'up' ? '看多' : '看空'}（${c.score.toFixed(1)}分）→ ${c.changePct >= 0 ? '+' : ''}${c.changePct.toFixed(2)}%，跟随收益${c.ret >= 0 ? '+' : ''}${c.ret.toFixed(2)}%</summary>` +
-        `<ul class="reasons-list">${c.reasons.map((r) => `<li>· ${escapeHtml(r)}</li>`).join('')}</ul>` +
-        `<div class="sy-note">入场${c.entry.toFixed(2)} → 出场${c.exit.toFixed(2)}（持有至${formatTime(c.exitTime)}）</div></details>`;
-      const wins = (h.cases.wins || []).map((c) => caseLine(c, true)).join('');
-      const losses = (h.cases.losses || []).map((c) => caseLine(c, false)).join('');
+  // 历史往期逐笔明细：时间升序，含进出场时间/价格、杠杆、ROI、累计ROI
+  let cumRoi = 0;
+  const tradeRows = (bt.allCalls || [])
+    .map((c) => {
+      cumRoi += c.roiPct;
+      const dirCls = c.direction === 'up' ? 'up' : 'down';
+      const roiCls = c.roiPct >= 0 ? 'up' : 'down';
+      const cumCls = cumRoi >= 0 ? 'up' : 'down';
       return (
-        `<div class="bt-hgroup"><div class="bt-htitle">${h.label} 代表案例</div>` +
-        (wins || losses || '<div class="sy-note">无</div>') +
-        `</div>`
+        `<tr>` +
+        `<td>${formatTime(c.time).slice(5)}</td>` +
+        `<td class="${dirCls}">${c.direction === 'up' ? '做多' : '做空'}·${c.horizonLabel}</td>` +
+        `<td>${c.entry.toFixed(1)}</td>` +
+        `<td>${formatTime(c.exitTime).slice(5)}</td>` +
+        `<td>${c.exit.toFixed(1)}</td>` +
+        `<td>${c.leverage}x</td>` +
+        `<td class="${roiCls}">${c.roiPct >= 0 ? '+' : ''}${c.roiPct.toFixed(0)}%</td>` +
+        `<td class="${cumCls}">${cumRoi >= 0 ? '+' : ''}${cumRoi.toFixed(0)}%</td>` +
+        `</tr>`
       );
     })
     .join('');
+  const tradesTable = tradeRows
+    ? `<div class="bt-htitle" style="margin-top:8px">历史逐笔明细（时间升序 · ${bt.allCalls.length}笔 · 含0.1%双边手续费）</div>` +
+      `<div class="bt-scroll"><table class="sy-table"><thead>` +
+      `<tr><th>进场时间</th><th>方向·周期</th><th>进场价</th><th>离场时间</th><th>离场价</th><th>杠杆</th><th>ROI</th><th>累计</th></tr>` +
+      `</thead><tbody>${tradeRows}</tbody></table></div>` +
+      `<div class="sy-note">ROI=杠杆×(方向收益%−0.1%手续费)，按收盘价复算、未含爆仓路径；累计为逐笔简单加总。</div>`
+    : '';
 
   const reflectHtml =
     `<div class="rv-reflect"><b>深刻反思与改进：</b><br>` +
@@ -1741,8 +1825,7 @@ async function runBacktestPanel() {
     `<div class="sy-note">标的 ${escapeHtml(symLabel)} · 回测于 ${formatTime(bt.generatedAt)}${state.usingMock ? ' · 模拟数据' : ''}</div>` +
     table +
     reflectHtml +
-    `<div style="margin-top:6px"><b>代表案例（点击展开当时理由）</b></div>` +
-    caseHtml;
+    tradesTable;
 
   backtestRunning = false;
 }
@@ -1872,6 +1955,7 @@ $('subIndicatorSelect').addEventListener('change', (e) => {
 
 $('toggleEvents').addEventListener('change', renderMarkers);
 $('toggleSignals').addEventListener('change', renderMarkers);
+$('toggleSwings').addEventListener('change', renderMarkers);
 $('toggleMute').addEventListener('change', (e) => {
   alerts.muted = e.target.checked;
 });

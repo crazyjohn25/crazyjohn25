@@ -195,6 +195,56 @@ export function analyzeTimeframe(candles) {
     }
   }
 
+  // --- 市场结构（ZigZag摆动点：截图主图的swing标价逻辑） ---
+  const swings = ind.swings || [];
+  if (swings.length >= 4) {
+    const highs = swings.filter((s) => s.type === 'high').slice(-2);
+    const lows = swings.filter((s) => s.type === 'low').slice(-2);
+    if (highs.length === 2 && lows.length === 2) {
+      const hh = highs[1].price > highs[0].price;
+      const hl = lows[1].price > lows[0].price;
+      if (hh && hl) {
+        score += 0.75;
+        reasons.push(`市场结构：高点抬高(${highs[0].price.toFixed(1)}→${highs[1].price.toFixed(1)})且低点抬高——标准上升结构`);
+      } else if (!hh && !hl) {
+        score -= 0.75;
+        reasons.push(`市场结构：高点降低(${highs[0].price.toFixed(1)}→${highs[1].price.toFixed(1)})且低点降低——标准下降结构`);
+      } else {
+        reasons.push('市场结构：高低点交错，处于结构转换/震荡阶段');
+      }
+    }
+  }
+
+  // --- 平滑随机指标（截图中间副图：超买超卖区转折） ---
+  const stoch = ind.stoch;
+  if (stoch && stoch.k[i] !== null && stoch.d[i] !== null && stoch.k[i - 1] !== null && stoch.d[i - 1] !== null) {
+    const kNow = stoch.k[i];
+    if (stoch.k[i - 1] <= stoch.d[i - 1] && kNow > stoch.d[i] && kNow < 35) {
+      score += 0.5;
+      reasons.push(`平滑STOCH低位金叉（K=${kNow.toFixed(0)}），超卖区转折向上`);
+    } else if (stoch.k[i - 1] >= stoch.d[i - 1] && kNow < stoch.d[i] && kNow > 65) {
+      score -= 0.5;
+      reasons.push(`平滑STOCH高位死叉（K=${kNow.toFixed(0)}），超买区转折向下`);
+    } else if (kNow > 80) {
+      reasons.push(`平滑STOCH=${kNow.toFixed(0)} 处于超买滞留区，追多需谨慎`);
+    } else if (kNow < 20) {
+      reasons.push(`平滑STOCH=${kNow.toFixed(0)} 处于超卖滞留区，杀跌需谨慎`);
+    }
+  }
+
+  // --- 动能爆发WAE（截图底部副图：动量超过爆发阈值才算有效行情） ---
+  const waeInd = ind.wae;
+  if (waeInd && waeInd.momentum[i] !== null && waeInd.explosion[i] !== null) {
+    const m = waeInd.momentum[i];
+    const ex = waeInd.explosion[i];
+    if (Math.abs(m) > ex) {
+      score += m > 0 ? 0.5 : -0.5;
+      reasons.push(`动能爆发：${m > 0 ? '多头' : '空头'}动量(${Math.abs(m).toFixed(1)})突破爆发线(${ex.toFixed(1)})，趋势有效性确认`);
+    } else if (Math.abs(m) < ex * 0.3) {
+      reasons.push('动能爆发：动量远低于爆发线，行情处于低动能整理，突破信号需等待');
+    }
+  }
+
   // --- ATR 波动率与支撑阻力位置 ---
   const atrV = ind.atr[i];
   const { support, resistance } = swingLevels(candles);

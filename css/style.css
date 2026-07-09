@@ -225,6 +225,8 @@ body {
 /* 回测 */
 .bt-hgroup { margin-top: 8px; }
 .bt-htitle { font-weight: 600; color: var(--accent); margin-bottom: 3px; font-size: 12px; }
+.bt-scroll { max-height: 340px; overflow-y: auto; }
+.bt-scroll thead th { position: sticky; top: 0; background: var(--panel); }
 
 /* 策略卡片 */
 .st-card {

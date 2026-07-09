@@ -363,6 +363,115 @@ export function willr(candles, period = 14) {
   return out;
 }
 
+/**
+ * ZigZag 摆动点（截图中的swing标价）：反转幅度超过 atrMult×ATR 才确认新枢轴
+ * @returns {Array<{index, time, price, type:'high'|'low'}>}
+ */
+export function zigzag(candles, { atrMult = 2.5, atrPeriod = 14 } = {}) {
+  const n = candles.length;
+  if (n < atrPeriod + 3) return [];
+  const atrArr = atr(candles, atrPeriod);
+  const pivots = [];
+  let dir = 0; // 1寻顶 -1寻底
+  let extIdx = 0;
+  let extPrice = candles[0].close;
+
+  for (let i = 1; i < n; i++) {
+    const th = (atrArr[i] ?? atrArr[atrPeriod] ?? 0) * atrMult;
+    const c = candles[i];
+    if (dir >= 0 && c.high > extPrice) {
+      extPrice = c.high;
+      extIdx = i;
+      dir = 1;
+    } else if (dir <= 0 && c.low < extPrice) {
+      extPrice = c.low;
+      extIdx = i;
+      dir = -1;
+    }
+    if (dir === 1 && th > 0 && extPrice - c.low >= th) {
+      pivots.push({ index: extIdx, time: candles[extIdx].time, price: extPrice, type: 'high' });
+      dir = -1;
+      extPrice = c.low;
+      extIdx = i;
+    } else if (dir === -1 && th > 0 && c.high - extPrice >= th) {
+      pivots.push({ index: extIdx, time: candles[extIdx].time, price: extPrice, type: 'low' });
+      dir = 1;
+      extPrice = c.high;
+      extIdx = i;
+    }
+  }
+  return pivots;
+}
+
+/**
+ * 平滑随机指标（截图中间副图：圆弧形K/D，超买超卖区停留）
+ * rawK(period) -> SMA(kSmooth) -> K；K -> SMA(dSmooth) -> D
+ */
+export function stochSmooth(candles, period = 14, kSmooth = 6, dSmooth = 6) {
+  const n = candles.length;
+  const raw = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    let hh = -Infinity;
+    let ll = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (candles[j].high > hh) hh = candles[j].high;
+      if (candles[j].low < ll) ll = candles[j].low;
+    }
+    const range = hh - ll;
+    raw[i] = range === 0 ? 50 : ((candles[i].close - ll) / range) * 100;
+  }
+  const smaOf = (arr, p) => {
+    const out = new Array(n).fill(null);
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i < n; i++) {
+      if (arr[i] === null) continue;
+      sum += arr[i];
+      cnt++;
+      if (cnt > p) {
+        // 找到p个之前的那个值减去
+        let k = i - 1;
+        let seen = 0;
+        for (; k >= 0; k--) {
+          if (arr[k] !== null) seen++;
+          if (seen === p) break;
+        }
+        sum -= arr[k];
+        cnt = p;
+      }
+      if (cnt === p) out[i] = sum / p;
+    }
+    return out;
+  };
+  const k = smaOf(raw, kSmooth);
+  const d = smaOf(k, dSmooth);
+  return { k, d };
+}
+
+/**
+ * 动能爆发 WAE（截图底部副图，Waddah Attar Explosion风格）：
+ * momentum = (MACD快线差分)×sensitivity（正绿负红），explosion = 布林带宽度阈值线，
+ * |momentum| > explosion 视为有效动能爆发。
+ */
+export function wae(candles, { fast = 20, slow = 40, sensitivity = 150, bbPeriod = 20, bbMult = 2 } = {}) {
+  const closes = candles.map((c) => c.close);
+  const emaFast = ema(closes, fast);
+  const emaSlow = ema(closes, slow);
+  const macdLine = closes.map((_, i) =>
+    emaFast[i] !== null && emaSlow[i] !== null ? emaFast[i] - emaSlow[i] : null
+  );
+  const n = candles.length;
+  const momentum = new Array(n).fill(null);
+  for (let i = 1; i < n; i++) {
+    if (macdLine[i] !== null && macdLine[i - 1] !== null) {
+      momentum[i] = (macdLine[i] - macdLine[i - 1]) * sensitivity;
+    }
+  }
+  const { upper, lower } = bollinger(candles, bbPeriod, bbMult);
+  const explosion = upper.map((u, i) => (u !== null && lower[i] !== null ? u - lower[i] : null));
+  return { momentum, explosion };
+}
+
 /** 一次性计算全部指标，供图表与信号引擎复用 */
 export function computeAll(candles, params = {}) {
   const closes = candles.map((c) => c.close);
@@ -381,5 +490,11 @@ export function computeAll(candles, params = {}) {
     cci: cci(candles, params.cciPeriod),
     mfi: mfi(candles, params.mfiPeriod),
     willr: willr(candles, params.willrPeriod),
+    ema10: ema(closes, 10),
+    ema30: ema(closes, 30),
+    ema60: ema(closes, 60),
+    stoch: stochSmooth(candles),
+    wae: wae(candles),
+    swings: zigzag(candles),
   };
 }

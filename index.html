@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=11" />
+  <link rel="stylesheet" href="css/style.css?v=12" />
   <!-- TradingView 开源图表库 lightweight-charts -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -38,9 +38,14 @@
         <select id="subIndicatorSelect">
           <option value="rsi" selected>RSI</option>
           <option value="kdj">KDJ</option>
+          <option value="stoch">平滑STOCH</option>
+          <option value="wae">WAE动能爆发</option>
           <option value="dmi">DMI</option>
           <option value="obv">OBV</option>
         </select>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="toggleSwings" checked /> 摆动点
       </label>
       <label class="checkbox">
         <input type="checkbox" id="toggleEvents" checked /> 宏观事件
@@ -58,7 +63,7 @@
   <main class="layout">
     <section class="charts">
       <div id="mainChart" class="chart main">
-        <div class="pane-label" id="mainLabel">K线 · BOLL(20,2) · 成交量</div>
+        <div class="pane-label" id="mainLabel">K线 · BOLL(20,2) · 均线彩带EMA10/30/60 · ZigZag摆动点 · 成交量</div>
       </div>
       <div id="macdChart" class="chart sub">
         <div class="pane-label">MACD(12,26,9) — 指数平滑异同移动平均线</div>
@@ -233,6 +238,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js?v=11"></script>
+  <script type="module" src="js/app.js?v=12"></script>
 </body>
 </html>
