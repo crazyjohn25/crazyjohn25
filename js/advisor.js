@@ -387,7 +387,7 @@ export function buildStrategyAdvice(perTf, opts = {}) {
     let score = primary.score;
     const reasons = [
       `主周期${st.tf}：${primary.verdict}（${primary.score.toFixed(1)}分）`,
-      ...primary.reasons.slice(0, 6),
+      ...primary.reasons.slice(0, 14),
     ];
 
     // 大周期趋势过滤：顺势加分，逆势重罚（不与大趋势作对）
