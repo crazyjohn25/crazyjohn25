@@ -51,10 +51,11 @@ test('adaptWeights 低命中率降权并生成反思', () => {
   assert.ok(reflections.some((r) => r.includes('1h')));
 });
 
-test('adaptWeights Polymarket低命中提示', () => {
-  const { reflections } = adaptWeights(
-    { 'polymarket:5m': { total: 8, hits: 3, hitRate: 0.375 } },
+test('adaptWeights 低命中周期降权', () => {
+  const { weights, reflections } = adaptWeights(
+    { 'advisor:15m': { total: 8, hits: 3, hitRate: 0.375 } },
     { '15m': 1 }
   );
-  assert.ok(reflections.some((r) => r.includes('Polymarket')));
+  assert.ok(weights['15m'] < 1);
+  assert.ok(reflections.some((r) => r.includes('15m')));
 });
