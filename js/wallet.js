@@ -1,11 +1,11 @@
 /**
  * 模拟交易钱包（Paper Trading，v3）
- * - 合约钱包：初始资金可在后台设置（默认$10000），单笔保证金$500-1000，杠杆20-100x，
+ * - 合约钱包：初始资金可在后台设置（默认$10000），单笔保证金$500-1000，杠杆10-30x（最高30倍），
  *   币安标准费率：taker 0.05%/边（开平双边计），资金费率 0.01%/8小时（按名义价值），
  *   亏损达保证金95%触发强平（损失全部保证金，含平仓费）。
  * - 支持手动平仓、注资、出金、设置初始资金。
  * - 每日收益复盘：只统计有真实平仓的日期（无开仓不记录）。
- * 核心风控：最多3个并存仓位、同品种同策略6小时冷却、只做高置信信号、每天至少一单（有合格信号时）。
+ * 核心风控：最多3个并存仓位、同品种同策略6小时冷却、只跟强烈信号开仓（不刷单）。
  */
 
 export const FEE_RATE = 0.0005; // taker 0.05%/边（币安USDT永续普通用户）
@@ -13,8 +13,16 @@ export const FUNDING_RATE = 0.0001; // 资金费率 0.01%/8h（币安常规基�
 export const FUNDING_INTERVAL = 8 * 3600;
 export const MARGIN_MIN = 500;
 export const MARGIN_MAX = 1000;
-export const LEV_MIN = 20;
-export const LEV_MAX = 100;
+export const LEV_MIN = 10;
+export const LEV_MAX = 30;
+
+/** 按强烈信号评分映射杠杆：阈值附近 10x，随强度上升，封顶 30x */
+export function leverageFromScore(absScore, threshold = 3) {
+  const s = Math.abs(Number(absScore) || 0);
+  const raw = 10 + (s - threshold) * 8;
+  return Math.max(LEV_MIN, Math.min(LEV_MAX, Math.round(raw)));
+}
+
 const LIQ_THRESHOLD = 0.95;
 
 const memoryStore = () => {

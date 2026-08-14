@@ -75,8 +75,8 @@ test('重大信号标记与置顶字段', () => {
   const out = buildStrategyAdvice(perTfAll(1));
   const majors = out.filter((s) => s.major);
   for (const m of majors) {
-    assert.ok(Math.abs(m.score) >= 2.5);
-    assert.ok(m.reasons[0].includes('重大信号'));
+    assert.ok(Math.abs(m.score) >= 3);
+    assert.ok(m.reasons[0].includes('强烈信号'));
   }
 });
 

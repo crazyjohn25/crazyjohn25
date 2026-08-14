@@ -11,8 +11,8 @@ const DEFAULTS = {
   emailWebhook: '', // 邮箱提醒webhook（如自建服务/IFTTT/Zapier），POST {subject, text}
   initialCapital: 10000, // 合约钱包初始资金（USD）
   pmCapital: 0, // 已停用
-  xAccounts: '', // 逗号分隔的X账号，如 elonmusk,VitalikButerin
-  tgChannels: 'ChannelPANews,foresightnews', // 逗号分隔的TG公开频道
+  xAccounts: 'johnliu409', // 逗号分隔的X账号；默认种子参考 x.com/johnliu409
+  tgChannels: 'ChannelPANews,foresightnews', // 公开频道用户名或 t.me 链接，社群链接稍后可追加
 };
 
 export function loadSettings() {

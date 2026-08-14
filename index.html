@@ -3,29 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>K线智能分析终端 · 宏观事件 + 多指标信号</title>
+  <title>K线智能分析终端 · 强烈信号 + 模拟盘</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=13" />
-  <!-- TradingView 开源图表库 lightweight-charts -->
+  <link rel="stylesheet" href="css/style.css?v=14" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">K线智能分析终端</div>
+    <div class="brand-block">
+      <div class="brand">K线终端</div>
+      <div class="brand-sub">图表独立 · 强烈信号存档 · 最高30x</div>
+    </div>
+    <div class="symbol-pills" id="symbolPills"></div>
     <div class="controls">
-      <label>品种
-        <select id="symbolSelect">
-          <option value="BTCUSDT">BTC/USDT</option>
-          <option value="ETHUSDT">ETH/USDT</option>
-          <option value="SOLUSDT">SOL/USDT</option>
-          <option value="BNBUSDT">BNB/USDT</option>
-          <option value="HYPE">HYPE/USDC (Hyperliquid)</option>
-          <option value="NDX">纳斯达克100</option>
-          <option value="AAPL">苹果 AAPL</option>
-          <option value="NVDA">英伟达 NVDA</option>
-          <option value="TSLA">特斯拉 TSLA</option>
-          <option value="MSTR">MicroStrategy MSTR</option>
-        </select>
+      <label class="more-sym">更多
+        <select id="symbolSelect"></select>
       </label>
       <label>周期
         <select id="intervalSelect">
@@ -38,7 +30,7 @@
           <option value="1d">日线</option>
         </select>
       </label>
-      <label>副图指标
+      <label>副图
         <select id="subIndicatorSelect">
           <option value="rsi" selected>RSI</option>
           <option value="kdj">KDJ</option>
@@ -48,9 +40,8 @@
           <option value="obv">OBV</option>
         </select>
       </label>
-      <label class="checkbox"><input type="checkbox" id="toggleEvents" checked /> 宏观事件</label>
-      <label class="checkbox"><input type="checkbox" id="toggleSignals" checked /> 买卖信号</label>
-      <label class="checkbox"><input type="checkbox" id="toggleSwings" checked /> 摆动点</label>
+      <label class="checkbox"><input type="checkbox" id="toggleSignals" checked /> 买卖箭头</label>
+      <label class="checkbox"><input type="checkbox" id="toggleSwings" /> 摆动点</label>
       <label class="checkbox"><input type="checkbox" id="toggleMute" /> 静音</label>
       <button id="settingsBtn" class="btn-icon" title="后台设置">⚙ 设置</button>
       <span id="connStatus" class="status">连接中…</span>
@@ -58,176 +49,188 @@
   </header>
 
   <main class="layout">
-    <section class="charts">
-      <div id="mainChart" class="chart main">
-        <div class="pane-label" id="mainLabel">K线 · BOLL(20,2) · 均线彩带EMA10/30/60 · ZigZag摆动点 · 成交量</div>
+    <section class="workspace">
+      <div class="quote-bar" id="quoteBar">
+        <span class="q-sym" id="quoteSymbol">—</span>
+        <span class="q-px" id="quotePrice">—</span>
+        <span class="q-chg" id="quoteChange"></span>
+        <span class="q-note">新闻与KOL在右侧情报栏，不叠在K线上</span>
       </div>
-      <div id="macdChart" class="chart sub">
-        <div class="pane-label">MACD(12,26,9) — 指数平滑异同移动平均线</div>
-      </div>
-      <div id="subChart" class="chart sub">
-        <div class="pane-label" id="subLabel">RSI(14) — 相对强弱指标</div>
+      <div class="charts">
+        <div id="mainChart" class="chart main">
+          <div class="pane-label" id="mainLabel">K线 · BOLL · EMA10/30/60 · 成交量</div>
+        </div>
+        <div id="macdChart" class="chart sub">
+          <div class="pane-label">MACD(12,26,9)</div>
+        </div>
+        <div id="subChart" class="chart sub">
+          <div class="pane-label" id="subLabel">RSI(14)</div>
+        </div>
       </div>
     </section>
 
-    <aside class="sidebar">
+    <aside class="intel">
+      <section class="archive-panel panel">
+        <h3>强烈信号存档 <span class="h-note">只收录共振信号 · 12小时去重 · 自动跟单</span></h3>
+        <div id="archiveBox" class="review-box"><div class="advisor-loading">暂无强烈信号</div></div>
+      </section>
+
       <nav class="tabbar">
         <button class="tab-btn active" data-tab="tabAdvice">建议</button>
-        <button class="tab-btn" data-tab="tabReport">报告</button>
-        <button class="tab-btn" data-tab="tabWallet">钱包</button>
-        <button class="tab-btn" data-tab="tabReview">复盘</button>
+        <button class="tab-btn" data-tab="tabKol">KOL</button>
         <button class="tab-btn" data-tab="tabNews">新闻</button>
+        <button class="tab-btn" data-tab="tabWallet">钱包</button>
+        <button class="tab-btn" data-tab="tabReport">报告</button>
+        <button class="tab-btn" data-tab="tabReview">复盘</button>
         <button class="tab-btn" data-tab="tabData">数据</button>
         <button class="tab-btn" data-tab="tabSerenity">Serenity</button>
       </nav>
 
-      <!-- Tab: 策略建议 -->
-      <div class="tab-page active" id="tabAdvice">
-        <div class="panel" id="advisorPanel">
-          <h3>策略建议 <span class="h-note">短线1-6h · 中短线6-24h · 长线1-3天 · 30分钟更新</span></h3>
-          <div id="advisorBox" class="advisor-box"><div class="advisor-loading">分析中…</div></div>
-          <button id="advisorRefresh" class="btn-small">立即重新分析</button>
-        </div>
-        <div class="panel">
-          <h3>建议复盘 <span class="h-note">预测 vs 实际 · 自动反思</span></h3>
-          <div id="reviewBox" class="review-box"><div class="advisor-loading">暂无已结算的预测</div></div>
-        </div>
-      </div>
-
-      <!-- Tab: 分析报告存档 -->
-      <div class="tab-page" id="tabReport">
-        <div class="panel">
-          <h3>每日复盘 <span class="h-note">每天 10:00 / 23:00 (UTC+8) 自动生成</span></h3>
-          <div id="dailyReviewBox" class="review-box"><div class="advisor-loading">到点后自动生成</div></div>
-        </div>
-        <div class="panel">
-          <h3>分析报告存档 <span class="h-note">每次建议刷新时存档 · 供复盘优化</span></h3>
-          <div id="reportBox" class="review-box"><div class="advisor-loading">暂无报告</div></div>
-        </div>
-      </div>
-
-      <!-- Tab: 模拟交易钱包 -->
-      <div class="tab-page" id="tabWallet">
-        <div class="panel">
-          <h3>模拟交易钱包 <span class="h-note">USD结算 · 币安标准费率 · 高置信自动开仓</span></h3>
-          <div id="walletBox" class="review-box"><div class="advisor-loading">初始化中…</div></div>
-          <div class="btn-row">
-            <button id="walletAddSpot" class="btn-small">+ 注资</button>
-            <button id="walletWithdraw" class="btn-small">− 出金</button>
-            <button id="walletSetInitial" class="btn-small">设置初始资金</button>
-            <button id="walletReset" class="btn-small danger">重置钱包</button>
+      <div class="tab-pages">
+        <div class="tab-page active" id="tabAdvice">
+          <div class="panel" id="advisorPanel">
+            <h3>策略建议 <span class="h-note">弱信号仅展示 · 强烈信号才存档开仓</span></h3>
+            <div id="advisorBox" class="advisor-box"><div class="advisor-loading">分析中…</div></div>
+            <button id="advisorRefresh" class="btn-small">立即重新分析</button>
+          </div>
+          <div class="panel">
+            <h3>建议复盘 <span class="h-note">仅强烈信号登记预测</span></h3>
+            <div id="reviewBox" class="review-box"><div class="advisor-loading">暂无已结算的预测</div></div>
           </div>
         </div>
-      </div>
 
-      <!-- Tab: AI交易复盘（只记录模拟钱包真实开仓） -->
-      <div class="tab-page" id="tabReview">
-        <div class="panel">
-          <h3>AI交易复盘 <span class="h-note">只记录模拟钱包真实开仓 · 无开仓不记录</span></h3>
-          <div id="aiReviewBox" class="review-box"><div class="advisor-loading">暂无交易记录</div></div>
+        <div class="tab-page" id="tabKol">
+          <div class="panel">
+            <h3>KOL 开仓雷达 <span class="h-note">BTC/ETH/SOL/BNB/HYPE · 参考 x.com/johnliu409</span></h3>
+            <div id="kolBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+          </div>
         </div>
-      </div>
 
-      <!-- Tab: 新闻 -->
-      <div class="tab-page" id="tabNews">
-        <div class="panel">
-          <button id="newsRefresh" class="btn-small" style="width:100%;margin:0 0 4px">↻ 立即刷新全部新闻源</button>
-          <div id="newsRefreshStatus" class="sy-note"></div>
+        <div class="tab-page" id="tabNews">
+          <div class="panel">
+            <button id="newsRefresh" class="btn-small" style="width:100%;margin:0 0 4px">↻ 立即刷新全部新闻源</button>
+            <div id="newsRefreshStatus" class="sy-note"></div>
+            <label class="checkbox news-on-chart"><input type="checkbox" id="toggleEvents" /> 在K线上用圆点标高影响事件（不含标题）</label>
+          </div>
+          <div class="panel">
+            <h3>宏观信息（国家层面）<span class="h-note">货币政策 · 数据 · 地缘 · 大宗</span></h3>
+            <ul id="macroList" class="event-list"></ul>
+          </div>
+          <div class="panel">
+            <h3>微观信息（公司/行业）<span class="h-note">个股 · 项目 · 赛道</span></h3>
+            <ul id="microList" class="event-list"></ul>
+          </div>
+          <div class="panel">
+            <details class="add-event">
+              <summary>+ 添加自定义事件</summary>
+              <form id="eventForm">
+                <input type="datetime-local" id="evtTime" required />
+                <input type="text" id="evtTitle" placeholder="事件标题" required maxlength="60" />
+                <select id="evtCategory">
+                  <option value="fed">美联储/货币政策</option>
+                  <option value="geo">地缘政治</option>
+                  <option value="oil">石油/大宗商品</option>
+                  <option value="sector">细分赛道</option>
+                  <option value="breaking">突发行情</option>
+                  <option value="other">其他</option>
+                </select>
+                <select id="evtImpact">
+                  <option value="high">高影响</option>
+                  <option value="medium" selected>中影响</option>
+                  <option value="low">低影响</option>
+                </select>
+                <input type="text" id="evtNote" placeholder="备注（可选）" maxlength="120" />
+                <button type="submit">添加</button>
+              </form>
+            </details>
+          </div>
         </div>
-        <div class="panel">
-          <h3>KOL信号雷达 <span class="h-note">BTC/ETH/HYPE · 10分钟刷新</span></h3>
-          <div id="kolBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
-        </div>
-        <div class="panel">
-          <h3>宏观信息（国家层面）<span class="h-note">货币政策 · 数据 · 地缘 · 大宗</span></h3>
-          <ul id="macroList" class="event-list"></ul>
-        </div>
-        <div class="panel">
-          <h3>微观信息（公司/行业）<span class="h-note">个股 · 项目 · 赛道</span></h3>
-          <ul id="microList" class="event-list"></ul>
-        </div>
-        <div class="panel">
-          <details class="add-event">
-            <summary>+ 添加自定义事件</summary>
-            <form id="eventForm">
-              <input type="datetime-local" id="evtTime" required />
-              <input type="text" id="evtTitle" placeholder="事件标题" required maxlength="60" />
-              <select id="evtCategory">
-                <option value="fed">美联储/货币政策</option>
-                <option value="geo">地缘政治</option>
-                <option value="oil">石油/大宗商品</option>
-                <option value="sector">细分赛道</option>
-                <option value="breaking">突发行情</option>
-                <option value="other">其他</option>
-              </select>
-              <select id="evtImpact">
-                <option value="high">高影响</option>
-                <option value="medium" selected>中影响</option>
-                <option value="low">低影响</option>
-              </select>
-              <input type="text" id="evtNote" placeholder="备注（可选）" maxlength="120" />
-              <button type="submit">添加</button>
-            </form>
-          </details>
-        </div>
-      </div>
 
-      <!-- Tab: 市场数据 -->
-      <div class="tab-page" id="tabData">
-        <div class="panel">
-          <h3>资产信息</h3>
-          <div id="assetInfoBox" class="review-box"></div>
+        <div class="tab-page" id="tabWallet">
+          <div class="panel">
+            <h3>模拟交易钱包 <span class="h-note">USD · 币安费率 · 最高30x · 仅跟强烈信号</span></h3>
+            <div id="walletBox" class="review-box"><div class="advisor-loading">初始化中…</div></div>
+            <div class="btn-row">
+              <button id="walletAddSpot" class="btn-small">+ 注资</button>
+              <button id="walletWithdraw" class="btn-small">− 出金</button>
+              <button id="walletSetInitial" class="btn-small">设置初始资金</button>
+              <button id="walletReset" class="btn-small danger">重置钱包</button>
+            </div>
+          </div>
         </div>
-        <div class="panel" id="gammaPanel">
-          <h3>做市商Gamma环境 <span class="h-note">Deribit期权 · 仅BTC/ETH</span></h3>
-          <div id="gammaBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
-        </div>
-        <div class="panel">
-          <h3>最新信号</h3>
-          <ul id="signalList" class="signal-list"></ul>
-        </div>
-        <div class="panel">
-          <h3>异常交易监控 <span class="h-note">量价异动 + 大额成交</span></h3>
-          <ul id="anomalyList" class="event-list"></ul>
-          <ul id="whaleList" class="event-list"></ul>
-        </div>
-        <div class="panel">
-          <h3>每小时交易量对比 <span class="h-note">UTC+8 · 基于1小时K线</span></h3>
-          <div id="volumeSummary" class="vol-summary"></div>
-          <table class="vol-table" id="volumeTable">
-            <thead><tr><th>时段</th><th>量</th><th>环比</th><th>vs 7日同时段</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
 
-      <!-- Tab: Serenity -->
-      <div class="tab-page" id="tabSerenity">
-        <div class="panel">
-          <h3>Serenity 指数 <span class="h-note">@aleabitoreddit 近30天推荐 · 等权基期100</span></h3>
-          <div id="serenityIndexBox" class="review-box"><div class="advisor-loading">加载行情中…</div></div>
+        <div class="tab-page" id="tabReport">
+          <div class="panel">
+            <h3>每日复盘 <span class="h-note">每天 10:00 / 23:00 (UTC+8)</span></h3>
+            <div id="dailyReviewBox" class="review-box"><div class="advisor-loading">到点后自动生成</div></div>
+          </div>
+          <div class="panel">
+            <h3>分析报告存档 <span class="h-note">每次建议刷新时存档</span></h3>
+            <div id="reportBox" class="review-box"><div class="advisor-loading">暂无报告</div></div>
+          </div>
         </div>
-        <div class="panel">
-          <h3>行业子指数 <span class="h-note">激光/封装/光模块/存储等 · 30天</span></h3>
-          <div id="serenitySubBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+
+        <div class="tab-page" id="tabReview">
+          <div class="panel">
+            <h3>AI交易复盘 <span class="h-note">只记录模拟钱包真实开仓</span></h3>
+            <div id="aiReviewBox" class="review-box"><div class="advisor-loading">暂无交易记录</div></div>
+          </div>
         </div>
-        <div class="panel">
-          <h3>组合动态监控 <span class="h-note">重点标的近3天新闻 · 10分钟自动刷新</span></h3>
-          <div id="serenityFeedBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+
+        <div class="tab-page" id="tabData">
+          <div class="panel">
+            <h3>资产信息</h3>
+            <div id="assetInfoBox" class="review-box"></div>
+          </div>
+          <div class="panel" id="gammaPanel">
+            <h3>做市商Gamma环境 <span class="h-note">Deribit期权 · 仅BTC/ETH</span></h3>
+            <div id="gammaBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+          </div>
+          <div class="panel">
+            <h3>最新信号</h3>
+            <ul id="signalList" class="signal-list"></ul>
+          </div>
+          <div class="panel">
+            <h3>异常交易监控 <span class="h-note">量价异动 + 大额成交</span></h3>
+            <ul id="anomalyList" class="event-list"></ul>
+            <ul id="whaleList" class="event-list"></ul>
+          </div>
+          <div class="panel">
+            <h3>每小时交易量对比 <span class="h-note">UTC+8 · 基于1小时K线</span></h3>
+            <div id="volumeSummary" class="vol-summary"></div>
+            <table class="vol-table" id="volumeTable">
+              <thead><tr><th>时段</th><th>量</th><th>环比</th><th>vs 7日同时段</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
-        <div class="panel">
-          <h3>推荐组合 <span class="h-note">行业 · 叙事 · 自动评分 · 点击展开详情</span></h3>
-          <div id="serenityPicksBox" class="review-box"></div>
-        </div>
-        <div class="panel">
-          <h3>方法论深度解析</h3>
-          <div id="serenityProfileBox" class="review-box"></div>
+
+        <div class="tab-page" id="tabSerenity">
+          <div class="panel">
+            <h3>Serenity 指数 <span class="h-note">@aleabitoreddit 近30天推荐 · 等权基期100</span></h3>
+            <div id="serenityIndexBox" class="review-box"><div class="advisor-loading">加载行情中…</div></div>
+          </div>
+          <div class="panel">
+            <h3>行业子指数 <span class="h-note">激光/封装/光模块/存储等 · 30天</span></h3>
+            <div id="serenitySubBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+          </div>
+          <div class="panel">
+            <h3>组合动态监控 <span class="h-note">重点标的近3天新闻 · 10分钟自动刷新</span></h3>
+            <div id="serenityFeedBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+          </div>
+          <div class="panel">
+            <h3>推荐组合 <span class="h-note">行业 · 叙事 · 自动评分 · 点击展开详情</span></h3>
+            <div id="serenityPicksBox" class="review-box"></div>
+          </div>
+          <div class="panel">
+            <h3>方法论深度解析</h3>
+            <div id="serenityProfileBox" class="review-box"></div>
+          </div>
         </div>
       </div>
     </aside>
   </main>
 
-  <!-- 后台设置弹窗 -->
   <div id="settingsModal" class="modal hidden">
     <div class="modal-box">
       <h3>后台设置</h3>
@@ -245,8 +248,12 @@
       </div>
       <div class="set-sec">
         <h4>信息源</h4>
-        <label>X关注列表（逗号分隔，参考 x.com/johnliu409）<input id="setXAccounts" type="text" placeholder="elonmusk,VitalikButerin" /></label>
-        <label>Telegram公开频道（逗号分隔）<input id="setTgChannels" type="text" placeholder="ChannelPANews,foresightnews" /></label>
+        <label>X关注列表（逗号分隔，参考 <a href="https://x.com/johnliu409" target="_blank" rel="noopener">x.com/johnliu409</a> 的关注）
+          <input id="setXAccounts" type="text" placeholder="johnliu409,lookonchain" />
+        </label>
+        <label>Telegram 公开频道（用户名或 t.me 链接，社群链接稍后可追加）
+          <input id="setTgChannels" type="text" placeholder="ChannelPANews, https://t.me/foresightnews" />
+        </label>
       </div>
       <div class="btn-row">
         <button id="settingsSave" class="btn-small primary">保存</button>
@@ -265,6 +272,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js?v=13"></script>
+  <script type="module" src="js/app.js?v=14"></script>
 </body>
 </html>

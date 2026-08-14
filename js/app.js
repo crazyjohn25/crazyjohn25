@@ -23,7 +23,7 @@ import {
 import { hourlyVolumeStats, rolling24hVolume, formatVolume } from './volume.js';
 import { detectCandleAnomalies, WhaleFeed } from './anomaly.js';
 import { fetchNews } from './news.js';
-import { runAdvisor, STRATEGIES } from './advisor.js';
+import { runAdvisor, STRATEGIES, MAJOR_THRESHOLD } from './advisor.js';
 import { ReviewLog } from './review.js';
 import { interpret } from './interpret.js';
 import {
@@ -46,14 +46,15 @@ import {
 import { getCompany } from './companies.js';
 import { getAssetInfo } from './assets.js';
 import { fetchGex, explainGex } from './gamma.js';
-import { PaperWallet } from './wallet.js';
+import { PaperWallet, leverageFromScore } from './wallet.js';
 import { ReportArchive, generateReport, generateDailyReview } from './report.js';
+import { SignalArchive } from './archive.js';
 import { getSettings, saveSettings } from './settings.js';
 import { notifyExternal, sendTelegram, sendEmail } from './notify.js';
-import { KOLS, getKolList, fetchKolSignals } from './radar.js';
+import { getKolList, fetchKolSignals } from './radar.js';
 
 /** 版本号：与 data/version.json 同步，旧部署会被远端更高版本强制引导到最新地址 */
-const APP_VERSION = 13;
+const APP_VERSION = 14;
 
 const $ = (id) => document.getElementById(id);
 
@@ -90,6 +91,7 @@ const whaleFeed = new WhaleFeed(30);
 const reviewLog = new ReviewLog();
 const wallet = new PaperWallet({ initialCapital: settings.initialCapital });
 const reports = new ReportArchive();
+const signalArchive = new SignalArchive();
 
 /** 高置信事件统一外发：页面toast+提示音+浏览器通知+Telegram/邮箱 */
 function pushAlert({ key, title, body, kind = 'risk', external = false }) {
@@ -230,6 +232,7 @@ function onRealtimeBar(bar, isClosed) {
     color: bar.close >= bar.open ? 'rgba(14,159,110,.4)' : 'rgba(224,36,36,.4)',
   });
   walletMark(state.symbol, bar.close);
+  renderQuoteBar();
 
   const now = Date.now();
   if (isClosed || now - lastFullRender > 5000) {
@@ -309,6 +312,7 @@ function recomputeAndRender({ fitContent }) {
 
   renderSubIndicator();
   renderMarkers();
+  renderQuoteBar();
   renderSignalList();
   renderAnomalyList();
   renderEventList();
@@ -426,8 +430,7 @@ async function refreshAdvisorAndVolume() {
   if (state.usingMock) state.candles1h = generateMockHistory('1h', 400);
 
   recordAdvisorPredictions();
-  notifyMajorSignals();
-  considerAutoTrades();
+  handleMajorSignals();
   archiveReport();
   renderAdvisor();
   renderVolumePanel();
@@ -445,7 +448,7 @@ function recordAdvisorPredictions() {
   const price = state.candles.length ? state.candles[state.candles.length - 1].close : null;
   if (!price) return;
   for (const st of adv.strategies) {
-    if (st.action === '观望' || st.action === '数据不足') continue;
+    if (!st.major || st.action === '观望' || st.action === '数据不足') continue;
     reviewLog.record({
       source: `advisor:${st.key}`,
       symbol: state.symbol,
@@ -456,37 +459,110 @@ function recordAdvisorPredictions() {
       note: st.action,
     });
   }
-  const valid = adv.strategies.filter((s) => s.action !== '数据不足');
-  if (valid.length) {
-    const avg = valid.reduce((s, x) => s + x.score, 0) / valid.length;
-    if (Math.abs(avg) >= 0.5) {
-      reviewLog.record({
-        source: 'advisor:daily',
-        symbol: state.symbol,
-        direction: avg > 0 ? 'up' : 'down',
-        priceAtCall: price,
-        callTime: now,
-        evalTime: now + 86400,
-        note: `日度综合（均分${avg.toFixed(1)}）`,
-      });
-    }
+  const majors = adv.strategies.filter((s) => s.major);
+  if (majors.length) {
+    const avg = majors.reduce((s, x) => s + x.score, 0) / majors.length;
+    reviewLog.record({
+      source: 'advisor:daily',
+      symbol: state.symbol,
+      direction: avg > 0 ? 'up' : 'down',
+      priceAtCall: price,
+      callTime: now,
+      evalTime: now + 86400,
+      note: `日度综合（强烈信号均分${avg.toFixed(1)}）`,
+    });
   }
 }
 
-function notifyMajorSignals() {
+function handleMajorSignals() {
   const adv = state.advice;
-  if (!adv || state.usingMock) return;
-  for (const st of adv.strategies) {
-    if (!st.major) continue;
-    const isBuy = st.score > 0;
-    pushAlert({
-      key: `major|${state.symbol}|${st.key}|${Math.floor(Date.now() / 1800000)}`,
-      title: `⚡重大信号 ${getSymbol(state.symbol).label} ${st.label}：${st.action}`,
-      body: `评分${st.score.toFixed(1)} · 置信度${(st.conf * 100).toFixed(0)}%` + (st.plan ? ` · 入场${st.plan.entry.toFixed(1)} 止损${st.plan.stop.toFixed(1)} 目标${st.plan.target.toFixed(1)}` : ''),
-      kind: isBuy ? 'buy' : 'sell',
-      external: true, // 重大信号外发Telegram/邮箱
-    });
+  if (!adv || !state.candles.length) return;
+  if (state.usingMock) {
+    renderArchive();
+    return;
   }
+  const price = state.candles[state.candles.length - 1].close;
+  const now = Math.floor(Date.now() / 1000);
+  for (const st of adv.strategies) {
+    if (!st.major || !st.plan) continue;
+    if (st.plan.rr !== null && st.plan.rr < 1) continue;
+    const rec = signalArchive.consider({
+      symbol: state.symbol,
+      strategy: st.key,
+      side: st.plan.direction,
+      score: st.score,
+      action: st.action,
+      label: st.label,
+      price,
+      plan: st.plan,
+      reasons: st.reasons.slice(0, 5),
+      time: now,
+    });
+    if (!rec) continue;
+    const lev = leverageFromScore(Math.abs(st.score), MAJOR_THRESHOLD);
+    pushAlert({
+      key: `major|${rec.fingerprint}|${rec.id}`,
+      title: `⚡强烈信号 ${getSymbol(state.symbol).label} ${st.label}：${st.action}`,
+      body: `评分${st.score.toFixed(1)} · 建议杠杆${lev}x` + (st.plan ? ` · 入场${st.plan.entry.toFixed(1)} 止损${st.plan.stop.toFixed(1)} 目标${st.plan.target.toFixed(1)}` : ''),
+      kind: st.score > 0 ? 'buy' : 'sell',
+      external: true,
+    });
+    const res = wallet.openPosition({
+      symbol: state.symbol,
+      side: st.plan.direction,
+      price,
+      margin: 500,
+      leverage: lev,
+      stop: st.plan.stop,
+      target: st.plan.target,
+      reason: `${st.label} ${st.action}（评分${st.score.toFixed(1)}）`,
+      time: now,
+      strategy: st.key,
+    });
+    if (res && !res.rejected) {
+      pushAlert({
+        key: `walletopen|${res.id}`,
+        title: `模拟钱包开仓：${getSymbol(state.symbol).label} ${st.plan.direction === 'long' ? '做多' : '做空'} ${lev}x`,
+        body: `保证金$500 · 入场${price.toFixed(1)} · 止损${st.plan.stop.toFixed(1)} · 目标${st.plan.target.toFixed(1)} · 开仓费$${(res.openFee || 0).toFixed(2)}（币安taker 0.05%）\n理由：${st.reasons.slice(0, 3).join('；')}`,
+        kind: st.plan.direction === 'long' ? 'buy' : 'sell',
+        external: true,
+      });
+      renderWalletTab();
+      renderAiReview();
+    }
+  }
+  renderArchive();
+}
+
+function renderArchive() {
+  const box = $('archiveBox');
+  if (!box) return;
+  const items = signalArchive.recent(12);
+  if (!items.length) {
+    setHtmlIfChanged(box, '<div class="advisor-loading">暂无强烈信号。弱信号不会刷屏，只有多指标共振才会存档并跟单。</div>');
+    return;
+  }
+  setHtmlIfChanged(
+    box,
+    items
+      .map((r) => {
+        const sideCls = r.side === 'long' ? 'bullish' : 'bearish';
+        const plan = r.plan
+          ? `<div class="plan">入场 ${Number(r.plan.entry).toFixed(1)} · 止损 ${Number(r.plan.stop).toFixed(1)} · 目标 ${Number(r.plan.target).toFixed(1)}` +
+            (r.plan.rr ? ` · 盈亏比 1:${Number(r.plan.rr).toFixed(1)}` : '') +
+            ` · ≤${r.plan.leverage || 30}x</div>`
+          : '';
+        return (
+          `<div class="arch-item">` +
+          `<div class="arch-head"><span>${escapeHtml(r.symbol)} · ${escapeHtml(r.label)}</span>` +
+          `<span class="bias ${sideCls}">${escapeHtml(r.action || (r.side === 'long' ? '做多' : '做空'))}</span></div>` +
+          `<div class="sy-note">评分 ${Number(r.score).toFixed(1)} · ${formatTime(r.time)}${r.price ? ` · 价${Number(r.price).toFixed(1)}` : ''}</div>` +
+          plan +
+          `</div>`
+        );
+      })
+      .join('')
+  );
 }
 
 function priceAt(symbol, timeSec) {
@@ -570,10 +646,10 @@ function renderAdvisor() {
         : '';
       const reasons = st.reasons.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
       return (
-        `<div class="st-card ${st.major ? 'major' : ''}">` +
+        `<div class="st-card ${st.major ? 'major' : 'weak'}">` +
         `<div class="st-head"><span class="st-label">${st.major ? '🔔 ' : ''}${escapeHtml(st.label)}</span>` +
         `<span class="action ${actionClass(st.action)}">${escapeHtml(st.action)}</span></div>` +
-        `<div class="sy-note">评分 ${st.score.toFixed(1)} · 置信度 ${(st.conf * 100).toFixed(0)}%</div>` +
+        `<div class="sy-note">评分 ${st.score.toFixed(1)} · 置信度 ${(st.conf * 100).toFixed(0)}%${st.major ? ' · 将存档并跟单' : ' · 未达强烈阈值，不播报不开仓'}</div>` +
         planHtml +
         `<details class="tf-row"><summary class="tf-head"><span class="tf-name">推理依据（${st.reasons.length}条）</span></summary>` +
         `<ul class="tf-reasons">${reasons}</ul></details>` +
@@ -583,7 +659,7 @@ function renderAdvisor() {
     .join('');
 
   box.innerHTML =
-    `<span class="upd">更新于 ${formatTime(adv.updatedAt)}${state.usingMock ? '（模拟数据）' : ''} · 建议已融合新闻面与历史复盘经验</span>` +
+    `<span class="upd">更新于 ${formatTime(adv.updatedAt)}${state.usingMock ? '（模拟数据，自动开仓已暂停）' : ''} · 仅 |评分|≥${MAJOR_THRESHOLD} 的强烈信号会存档、提醒并模拟开仓</span>` +
     cards;
 }
 
@@ -682,17 +758,18 @@ function renderMarkers() {
 
   if ($('toggleSignals').checked) {
     for (const s of state.signals) {
+      if (s.score < 3) continue;
       markers.push({
         time: s.time,
         position: s.side === 'buy' ? 'belowBar' : 'aboveBar',
         color: s.side === 'buy' ? '#0e9f6e' : '#e02424',
         shape: s.side === 'buy' ? 'arrowUp' : 'arrowDown',
-        text: s.side === 'buy' ? `B${s.score}` : `S${s.score}`,
+        text: s.side === 'buy' ? 'B' : 'S',
       });
     }
   }
 
-  if ($('toggleEvents').checked) {
+  if ($('toggleEvents') && $('toggleEvents').checked) {
     for (const evt of chartEvents()) {
       const t = nearestCandleTime(evt.time);
       if (t === null) continue;
@@ -702,8 +779,7 @@ function renderMarkers() {
         time: t,
         position: 'aboveBar',
         color: EVENT_CATEGORIES[evt.category].color,
-        shape: evt.impact === 'high' ? 'circle' : 'square',
-        text: evt.title.length > 12 ? evt.title.slice(0, 12) + '…' : evt.title,
+        shape: 'circle',
       });
     }
   }
@@ -978,81 +1054,6 @@ function renderDailyReviewBox() {
 
 // ---------------- 模拟交易钱包 ----------------
 
-function considerAutoTrades() {
-  const adv = state.advice;
-  if (!adv || !state.candles.length) return;
-  if (state.usingMock) return;
-  const price = state.candles[state.candles.length - 1].close;
-  const now = Math.floor(Date.now() / 1000);
-  for (const st of adv.strategies) {
-    if (!st.major || !st.plan) continue;
-    if (st.plan.rr !== null && st.plan.rr < 1) continue;
-    const lev = Math.max(20, Math.min(100, Math.round(20 + (Math.abs(st.score) - 2.5) * 30)));
-    const res = wallet.openPosition({
-      symbol: state.symbol,
-      side: st.plan.direction,
-      price,
-      margin: 500,
-      leverage: lev,
-      stop: st.plan.stop,
-      target: st.plan.target,
-      reason: `${st.label} ${st.action}（评分${st.score.toFixed(1)}）`,
-      time: now,
-      strategy: st.key,
-    });
-    if (res && !res.rejected) {
-      pushAlert({
-        key: `walletopen|${res.id}`,
-        title: `模拟钱包开仓：${getSymbol(state.symbol).label} ${st.plan.direction === 'long' ? '做多' : '做空'} ${lev}x`,
-        body: `保证金$500 · 入场${price.toFixed(1)} · 止损${st.plan.stop.toFixed(1)} · 目标${st.plan.target.toFixed(1)}\n理由：${st.reasons.slice(0, 3).join('；')}`,
-        kind: st.plan.direction === 'long' ? 'buy' : 'sell',
-        external: true,
-      });
-      renderWalletTab();
-      renderAiReview();
-    }
-  }
-}
-
-/** 每天至少一单：若今日（UTC+8）尚无开仓且当前有合格信号（|评分|≥1.5、有计划、盈亏比≥1），开一单 */
-function ensureDailyTrade() {
-  if (state.usingMock || !state.advice || !state.candles.length) return;
-  const todayStart = Math.floor((Math.floor(Date.now() / 1000) + 8 * 3600) / 86400) * 86400 - 8 * 3600;
-  const openedToday = [...wallet.positions, ...wallet.closed].some((t) => t.openTime >= todayStart);
-  if (openedToday) return;
-  const price = state.candles[state.candles.length - 1].close;
-  const now = Math.floor(Date.now() / 1000);
-  const candidates = state.advice.strategies
-    .filter((s) => s.plan && Math.abs(s.score) >= 1.5 && (s.plan.rr === null || s.plan.rr >= 1))
-    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
-  if (!candidates.length) return;
-  const st = candidates[0];
-  const lev = Math.max(20, Math.min(100, Math.round(20 + (Math.abs(st.score) - 1.5) * 20)));
-  const res = wallet.openPosition({
-    symbol: state.symbol,
-    side: st.plan.direction,
-    price,
-    margin: 500,
-    leverage: lev,
-    stop: st.plan.stop,
-    target: st.plan.target,
-    reason: `每日一单：${st.label} ${st.action}（评分${st.score.toFixed(1)}，当日首个合格信号）`,
-    time: now,
-    strategy: `daily-${st.key}`,
-  });
-  if (res && !res.rejected) {
-    pushAlert({
-      key: `dailytrade|${res.id}`,
-      title: `每日一单开仓：${getSymbol(state.symbol).label} ${st.plan.direction === 'long' ? '做多' : '做空'} ${lev}x`,
-      body: `保证金$500 · 入场${price.toFixed(1)}\n理由：${st.reasons.slice(0, 3).join('；')}`,
-      kind: st.plan.direction === 'long' ? 'buy' : 'sell',
-      external: true,
-    });
-    renderWalletTab();
-    renderAiReview();
-  }
-}
-
 function walletMark(symbol, price) {
   const closed = wallet.markPrice(symbol, price, Math.floor(Date.now() / 1000));
   for (const t of closed) {
@@ -1121,8 +1122,8 @@ function renderWalletTab() {
     (state.usingMock
       ? `<div class="rv-reflect" style="margin-top:6px">⚠ 当前为离线模拟行情，自动交易已暂停；连接真实行情后自动恢复。</div>`
       : '') +
-    `<div class="rv-reflect" style="margin-top:6px">规则：初始资金可在设置调整（默认$10000） · 单笔保证金$500-1000 · 杠杆20-100x按信号强度分档 · ` +
-    `币安标准费率：taker 0.05%/边 + 资金费0.01%/8h · 亏损95%强平 · 最多3仓 · 同键6小时冷却 · 每天至少一单（有合格信号时）</div>`;
+    `<div class="rv-reflect" style="margin-top:6px">规则：初始资金可在设置调整（默认$10000） · 单笔保证金$500-1000 · 杠杆10-30x（最高30倍，按强烈信号强度分档） · ` +
+    `币安标准费率：开平各收 taker 0.05%（按名义价值）+ 资金费0.01%/8h · 亏损95%强平 · 最多3仓 · 同键6小时冷却 · 只跟存档的强烈信号开仓，不刷单</div>`;
 
   box.querySelectorAll('.pos-close-btn').forEach((btn) =>
     btn.addEventListener('click', () => {
@@ -1412,7 +1413,7 @@ async function watchAllSymbols() {
           if (atrV) {
             const entry = candles[candles.length - 1].close;
             const long = s.side === 'buy';
-            const lev = Math.max(20, Math.min(100, Math.round(20 + (s.score - 4) * 20)));
+            const lev = leverageFromScore(s.score, 4);
             const res = wallet.openPosition({
               symbol: sym.id,
               side: long ? 'long' : 'short',
@@ -1465,22 +1466,25 @@ async function refreshNews() {
 async function refreshKolRadar() {
   const box = $('kolBox');
   if (!box) return;
-  const items = await fetchKolSignals(getSettings().xAccounts);
+  const s = getSettings();
+  const items = await fetchKolSignals(s.xAccounts, s.tgChannels);
   const listHtml = items.length
     ? items
         .map((x) =>
           `<div class="kol-item"><span class="bias ${x.bias}">${x.bias === 'bullish' ? '看多' : x.bias === 'bearish' ? '看空' : '中性'}</span>` +
+          (x.open ? '<span class="kol-open">开仓/建议</span>' : '') +
+          (x.coins || []).map((c) => `<span class="kol-coin">${c}</span>`).join('') +
           `<span class="kol-name">${escapeHtml(x.kol)}</span>` +
           `<a href="${escapeHtml(x.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(x.title)}</a>` +
-          `<br><span class="time">${formatTime(x.time)} · <a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--muted)">${escapeHtml(x.handle)}</a></span></div>`
+          `<br><span class="time">${formatTime(x.time)} · ${escapeHtml(x.platform || 'X')} · <a href="${escapeHtml(x.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--muted)">${escapeHtml(x.handle)}</a></span></div>`
         )
         .join('')
-    : '<div class="advisor-loading">暂无近期公开信号（或网络受限）</div>';
+    : '<div class="advisor-loading">暂无近期公开开仓信号（X/TG直连需Key，当前走公开RSS与转载检索；网络受限时也会为空）</div>';
 
   const kolListHtml =
     `<details class="kol-list-note"><summary class="tf-head"><span class="tf-name">监控清单与说明</span></summary>` +
-    `<div class="sy-note">${getKolList(getSettings().xAccounts).map((k) => `${escapeHtml(k.name)}（${escapeHtml(k.handle)}·${escapeHtml(k.style)}）`).join('；')}</div>` +
-    `<div class="sy-note" style="margin-top:4px">X/Telegram的API需付费Key，本雷达通过公开新闻聚合捕捉KOL被报道/转载的最新观点；可在"设置"中添加你的X关注列表（参考 x.com/johnliu409）。KOL观点不构成投资建议。</div></details>`;
+    `<div class="sy-note">${getKolList(s.xAccounts).map((k) => `${escapeHtml(k.name)}（${escapeHtml(k.handle)}·${escapeHtml(k.style)}）`).join('；')}</div>` +
+    `<div class="sy-note" style="margin-top:4px">关注风格参考 <a href="https://x.com/johnliu409" target="_blank" rel="noopener">x.com/johnliu409</a>。可在设置中追加你的X关注；Telegram社群链接稍后填入公开频道用户名或 t.me 链接即可接入。KOL观点不构成投资建议。</div></details>`;
 
   setHtmlIfChanged(box, listHtml + kolListHtml);
 }
@@ -1501,6 +1505,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     }
     if (btn.dataset.tab === 'tabReport') { renderReports(); renderDailyReviewBox(); }
     if (btn.dataset.tab === 'tabReview') renderAiReview();
+    if (btn.dataset.tab === 'tabKol') refreshKolRadar();
   });
 });
 
@@ -1510,7 +1515,63 @@ const symbolSelect = $('symbolSelect');
 symbolSelect.innerHTML = SYMBOLS.map((s) => `<option value="${s.id}">${s.label}</option>`).join('');
 symbolSelect.value = state.symbol;
 
-symbolSelect.addEventListener('change', (e) => { state.symbol = e.target.value; loadSymbol(); });
+function renderSymbolPills() {
+  const box = $('symbolPills');
+  if (!box) return;
+  const crypto = SYMBOLS.filter((s) => s.source !== 'stock');
+  box.innerHTML = crypto
+    .map(
+      (s) =>
+        `<button type="button" class="pill${s.id === state.symbol ? ' active' : ''}" data-id="${s.id}">${escapeHtml(s.base)}</button>`
+    )
+    .join('');
+  box.querySelectorAll('.pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.id === state.symbol) return;
+      state.symbol = btn.dataset.id;
+      symbolSelect.value = state.symbol;
+      renderSymbolPills();
+      loadSymbol();
+    });
+  });
+}
+
+function formatPx(px) {
+  if (px == null || !Number.isFinite(px)) return '—';
+  if (px >= 1000) return px.toFixed(1);
+  if (px >= 10) return px.toFixed(2);
+  return px.toFixed(4);
+}
+
+function renderQuoteBar() {
+  const symEl = $('quoteSymbol');
+  const pxEl = $('quotePrice');
+  const chgEl = $('quoteChange');
+  if (!symEl) return;
+  const sym = getSymbol(state.symbol);
+  symEl.textContent = sym.label;
+  const candles = state.candles;
+  if (!candles.length) {
+    pxEl.textContent = '—';
+    chgEl.textContent = '';
+    chgEl.className = 'q-chg';
+    return;
+  }
+  const last = candles[candles.length - 1];
+  const ref = candles.length > 1 ? candles[candles.length - 2].close : last.open;
+  const pct = ref ? ((last.close - ref) / ref) * 100 : 0;
+  pxEl.textContent = formatPx(last.close);
+  chgEl.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  chgEl.className = `q-chg ${pct >= 0 ? 'up' : 'down'}`;
+}
+
+renderSymbolPills();
+
+symbolSelect.addEventListener('change', (e) => {
+  state.symbol = e.target.value;
+  renderSymbolPills();
+  loadSymbol();
+});
 $('intervalSelect').addEventListener('change', (e) => { state.interval = e.target.value; loadSymbol(); });
 $('subIndicatorSelect').addEventListener('change', (e) => { state.subIndicator = e.target.value; renderSubIndicator(); });
 $('toggleEvents').addEventListener('change', renderMarkers);
@@ -1519,6 +1580,22 @@ $('toggleSwings').addEventListener('change', renderMarkers);
 $('toggleMute').addEventListener('change', (e) => { alerts.muted = e.target.checked; });
 $('advisorRefresh').addEventListener('click', refreshAdvisorAndVolume);
 $('newsRefresh').addEventListener('click', refreshNews);
+$('eventForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const t = $('evtTime').value;
+  const title = $('evtTitle').value.trim();
+  if (!t || !title) return;
+  addCustomEvent({
+    time: Math.floor(new Date(t).getTime() / 1000),
+    title,
+    category: $('evtCategory').value,
+    impact: $('evtImpact').value,
+    note: $('evtNote').value.trim(),
+  });
+  e.target.reset();
+  renderEventList();
+  renderMarkers();
+});
 
 $('walletAddSpot').addEventListener('click', () => {
   const amt = prompt('注资多少美元？', '5000');
@@ -1571,6 +1648,7 @@ $('settingsSave').addEventListener('click', () => {
     tgChannels: $('setTgChannels').value.trim(),
   });
   $('settingsModal').classList.add('hidden');
+  refreshKolRadar();
   alert('设置已保存');
 });
 $('testNotify').addEventListener('click', async () => {
@@ -1590,6 +1668,7 @@ $('testNotify').addEventListener('click', async () => {
 // ---------------- 启动 ----------------
 
 alerts.requestPermission();
+renderArchive();
 loadSymbol();
 renderWalletTab();
 renderAiReview();
@@ -1602,8 +1681,7 @@ refreshKolRadar();
 setInterval(refreshKolRadar, 10 * 60 * 1000);
 setInterval(refreshGamma, 10 * 60 * 1000);
 setInterval(watchAllSymbols, 2 * 60 * 1000);
-// 每日两次复盘检查（10:00 / 23:00 UTC+8）+ 每天至少一单检查
-setInterval(() => { checkDailyReview(); ensureDailyTrade(); }, 60 * 1000);
+setInterval(() => { checkDailyReview(); }, 60 * 1000);
 setInterval(() => {
   settleReviews();
   renderReviewPanel();

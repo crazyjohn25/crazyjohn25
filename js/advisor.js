@@ -17,10 +17,13 @@ export const TF_WEIGHTS = { '15m': 1, '30m': 1.5, '1h': 2, '4h': 3 };
  * - 长线 1-3天：1d主周期
  * 每层输出独立的行动建议、交易计划、置信度；重大信号(major)置顶并触发提示音。
  */
+/** 强烈信号阈值：只有多指标高度共振才存档/提醒/自动开仓 */
+export const MAJOR_THRESHOLD = 3;
+
 export const STRATEGIES = [
-  { key: 'short', label: '短线策略（1-6小时）', tf: '1h', filterTf: '4h', holdSec: 4 * 3600, leverage: 50, stopAtr: 1.2, targetAtr: 2.0 },
-  { key: 'mid', label: '中短线策略（6-24小时）', tf: '4h', filterTf: '1d', holdSec: 12 * 3600, leverage: 30, stopAtr: 1.8, targetAtr: 3.0 },
-  { key: 'long', label: '长线策略（1-3天）', tf: '1d', filterTf: null, holdSec: 48 * 3600, leverage: 20, stopAtr: 2.5, targetAtr: 4.0 },
+  { key: 'short', label: '短线策略（1-6小时）', tf: '1h', filterTf: '4h', holdSec: 4 * 3600, leverage: 30, stopAtr: 1.2, targetAtr: 2.0 },
+  { key: 'mid', label: '中短线策略（6-24小时）', tf: '4h', filterTf: '1d', holdSec: 12 * 3600, leverage: 20, stopAtr: 1.8, targetAtr: 3.0 },
+  { key: 'long', label: '长线策略（1-3天）', tf: '1d', filterTf: null, holdSec: 48 * 3600, leverage: 10, stopAtr: 2.5, targetAtr: 4.0 },
 ];
 export const STRATEGY_TFS = ['1h', '4h', '1d'];
 
@@ -423,8 +426,8 @@ export function buildStrategyAdvice(perTf, opts = {}) {
 
     const action = actionOf(score);
     const conf = Math.min(1, Math.abs(score) / 4);
-    const major = Math.abs(score) >= 2.5 && action !== '观望';
-    if (major) reasons.unshift('⚡ 重大信号：多周期与多指标高度共振');
+    const major = Math.abs(score) >= MAJOR_THRESHOLD && action !== '观望';
+    if (major) reasons.unshift('⚡ 强烈信号：多周期与多指标高度共振，已进入存档并允许模拟开仓');
 
     // 交易计划：主周期ATR + 支撑阻力
     let plan = null;
