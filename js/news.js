@@ -33,6 +33,8 @@ export const NEWS_FEEDS = [
   { source: 'PANews', url: 'https://rss.panewslab.com/zh/tvsq/rss' },
   { source: 'PANews·TG', url: 'https://rsshub.rssforever.com/telegram/channel/ChannelPANews' },
   { source: 'Foresight·TG', url: 'https://rsshub.rssforever.com/telegram/channel/foresightnews' },
+  { source: '金十数据', url: 'https://rsshub.rssforever.com/jin10' },
+  { source: 'ChainCatcher', url: 'https://www.chaincatcher.com/rss.xml' },
   {
     source: 'Google加密快讯',
     url: 'https://news.google.com/rss/search?q=(crypto%20OR%20bitcoin%20OR%20ethereum)%20when:1d&hl=en-US&gl=US&ceid=US:en',
@@ -54,6 +56,10 @@ const SYMBOL_SEARCH = {
   BNB: 'BNB Binance coin when:3d',
   HYPE: 'Hyperliquid HYPE crypto when:5d',
   NDX: 'Nasdaq 100 OR Nvidia OR AI semiconductor stocks when:2d',
+  AAPL: 'Apple AAPL stock when:2d',
+  NVDA: 'Nvidia NVDA stock when:2d',
+  TSLA: 'Tesla TSLA stock when:2d',
+  MSTR: 'MicroStrategy MSTR stock when:2d',
 };
 
 function symbolSearchFeed(base) {
@@ -74,6 +80,10 @@ const SYMBOL_KEYWORDS = {
   BNB: ['bnb', 'binance coin'],
   HYPE: ['hyperliquid', 'hype'],
   NDX: ['nasdaq', 'nvidia', 'nvda', 'apple', 'microsoft', 'tech stocks', '纳指', '纳斯达克', 'ai stocks', 'chip', 'semiconductor', '英伟达', '芯片', '半导体'],
+  AAPL: ['apple', 'aapl', 'iphone', '苹果'],
+  NVDA: ['nvidia', 'nvda', '英伟达', 'gpu', 'blackwell'],
+  TSLA: ['tesla', 'tsla', 'musk', '特斯拉', '马斯克'],
+  MSTR: ['microstrategy', 'mstr', 'saylor', 'strategy', '微策略'],
 };
 
 /** 宏观关键词 -> 分类 */

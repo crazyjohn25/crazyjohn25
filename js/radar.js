@@ -12,7 +12,7 @@
 
 const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
 
-/** 10个知名KOL/社群清单（公开、有长期记录的分析师，不构成推荐） */
+/** 默认KOL清单（公开、有长期记录的分析师，不构成推荐） */
 export const KOLS = [
   { name: 'Peter Brandt', handle: '@PeterLBrandt', platform: 'X', url: 'https://x.com/PeterLBrandt', style: '经典图表形态，40年经验', query: '"Peter Brandt" bitcoin OR crypto when:3d' },
   { name: 'Rekt Capital', handle: '@rektcapital', platform: 'X', url: 'https://x.com/rektcapital', style: 'BTC周期与减半分析', query: '"Rekt Capital" bitcoin when:3d' },
@@ -25,6 +25,23 @@ export const KOLS = [
   { name: 'CryptoQuant社区', handle: 'cryptoquant.com', platform: 'Web', url: 'https://cryptoquant.com/community', style: '链上数据信号', query: 'CryptoQuant bitcoin analysis when:2d' },
   { name: 'Glassnode', handle: '@glassnode', platform: 'X', url: 'https://x.com/glassnode', style: '链上指标周报', query: 'Glassnode bitcoin when:3d' },
 ];
+
+/** 合并默认清单 + 用户在后台设置里配置的X关注列表（参考 x.com/johnliu409 的关注） */
+export function getKolList(customXAccounts = '') {
+  const extra = String(customXAccounts || '')
+    .split(',')
+    .map((s) => s.trim().replace(/^@/, ''))
+    .filter(Boolean)
+    .map((handle) => ({
+      name: handle,
+      handle: `@${handle}`,
+      platform: 'X',
+      url: `https://x.com/${handle}`,
+      style: '自定义关注',
+      query: `"${handle}" crypto OR bitcoin when:3d`,
+    }));
+  return [...KOLS, ...extra];
+}
 
 /** 信号相关关键词（只保留 BTC/ETH/HYPE 相关内容） */
 const COIN_WORDS = ['btc', 'bitcoin', '比特币', 'eth', 'ethereum', '以太坊', 'hype', 'hyperliquid'];
@@ -64,11 +81,12 @@ async function fetchFeedJson(url, timeoutMs = 12000) {
 
 /**
  * 聚合全部KOL的最新信号（每位取最新2条相关内容）
+ * @param {string} customXAccounts 后台设置的自定义X账号（逗号分隔）
  * @returns {Array<{kol, handle, url, title, link, time, bias}>} 按时间降序
  */
-export async function fetchKolSignals() {
+export async function fetchKolSignals(customXAccounts = '') {
   const results = await Promise.all(
-    KOLS.map(async (k) => {
+    getKolList(customXAccounts).map(async (k) => {
       const gUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(k.query)}&hl=en-US&gl=US&ceid=US:en`;
       const items = (await fetchFeedJson(gUrl)) || [];
       return items

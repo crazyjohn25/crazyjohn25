@@ -20,6 +20,10 @@ export const SYMBOLS = [
   { id: 'BNBUSDT', label: 'BNB/USDT', source: 'binance', base: 'BNB', whaleUsd: 200000 },
   { id: 'HYPE', label: 'HYPE/USDC (Hyperliquid)', source: 'hyperliquid', base: 'HYPE', whaleUsd: 100000 },
   { id: 'NDX', label: '纳斯达克100 (NDX)', source: 'stock', base: 'NDX', whaleUsd: Infinity, yahoo: '^NDX' },
+  { id: 'AAPL', label: '苹果 AAPL', source: 'stock', base: 'AAPL', whaleUsd: Infinity, yahoo: 'AAPL' },
+  { id: 'NVDA', label: '英伟达 NVDA', source: 'stock', base: 'NVDA', whaleUsd: Infinity, yahoo: 'NVDA' },
+  { id: 'TSLA', label: '特斯拉 TSLA', source: 'stock', base: 'TSLA', whaleUsd: Infinity, yahoo: 'TSLA' },
+  { id: 'MSTR', label: 'MicroStrategy MSTR', source: 'stock', base: 'MSTR', whaleUsd: Infinity, yahoo: 'MSTR' },
 ];
 
 /** 最近一次股票行情的来源：live=实时接口 / snapshot=内置快照 */

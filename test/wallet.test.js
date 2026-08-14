@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PaperWallet, FEE_RATE } from '../js/wallet.js';
+import { PaperWallet, FEE_RATE, FUNDING_RATE, FUNDING_INTERVAL } from '../js/wallet.js';
 
 const T0 = 1783500000;
 
@@ -8,7 +8,7 @@ function mkWallet() {
   return new PaperWallet({}); // 无localStorage时自动用内存存储
 }
 
-test('开仓收取手续费并冻结保证金（初始$10000，杠杆下限20x）', () => {
+test('开仓收取手续费并冻结保证金（默认初始$10000，杠杆下限20x）', () => {
   const w = mkWallet();
   const pos = w.openPosition({ symbol: 'BTCUSDT', side: 'long', price: 100, margin: 500, leverage: 20, time: T0, strategy: 'short' });
   assert.ok(pos.id);
@@ -27,7 +27,7 @@ test('保证金与杠杆强制夹取到 [500,1000] 与 [20,100]', () => {
   assert.equal(pos2.leverage, 100);
 });
 
-test('止盈自动平仓：盈亏与ROI正确', () => {
+test('止盈自动平仓：盈亏、双边手续费与ROI正确', () => {
   const w = mkWallet();
   w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, target: 101, stop: 99.5, time: T0, strategy: 'short' });
   const closed = w.markPrice('BTC', 101, T0 + 600);
@@ -44,27 +44,36 @@ test('止盈自动平仓：盈亏与ROI正确', () => {
 test('做空止损与强平（100x下反向0.95%即强平）', () => {
   const w = mkWallet();
   w.openPosition({ symbol: 'ETH', side: 'short', price: 100, margin: 500, leverage: 100, stop: 103, time: T0, strategy: 'mid' });
-  // 100x做空，价格+0.95% → 亏损475 = 95%保证金 → 强平
   const closed = w.markPrice('ETH', 100.95, T0 + 60);
   assert.equal(closed.length, 1);
   assert.equal(closed[0].cause, 'liquidated');
   assert.ok(Math.abs(closed[0].pnl - -500) < 1e-9, '强平损失全部保证金');
 });
 
-test('addFunds 手动注资并同步抬高收益基准', () => {
+test('资金费率：每8小时按名义价值0.01%计提', () => {
   const w = mkWallet();
-  assert.equal(w.baseCapital, 11000);
-  assert.ok(w.addFunds(5000, 'spot'));
-  assert.equal(w.cash, 15000);
-  assert.equal(w.baseCapital, 16000, '注资应计入本金基准，不虚增收益率');
-  assert.ok(w.addFunds('2000', 'pm'));
-  assert.equal(w.pmCash, 3000);
-  assert.equal(w.baseCapital, 18000);
-  assert.ok(!w.addFunds(-5, 'spot'));
-  assert.ok(!w.addFunds('abc', 'spot'));
+  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, time: T0, strategy: 's' });
+  // 持有16小时 → 2期资金费 = 10000 × 0.0001 × 2 = 2
+  const closed = w.markPrice('BTC', 100, T0 + 16 * 3600 + 60);
+  // 价格不变不会触发止损/止盈/强平
+  assert.equal(closed.length, 0);
+  const pos = w.positions[0];
+  assert.ok(Math.abs(pos.fundingPaid - 10000 * FUNDING_RATE * 2) < 1e-9);
+  // 手动平仓后资金费计入净盈亏
+  const rec = w.closePosition(pos.id, 100, T0 + 16 * 3600 + 120, 'manual');
+  assert.ok(Math.abs(rec.funding - 2) < 1e-9);
+  assert.ok(Math.abs(rec.netPnl - (0 - 5 - 5 - 2)) < 1e-9);
 });
 
-test('风控：最多3仓、同键去重、冷却、余额不足', () => {
+test('手动平仓 cause=manual', () => {
+  const w = mkWallet();
+  const pos = w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, time: T0, strategy: 's' });
+  const rec = w.closePosition(pos.id, 102, T0 + 300, 'manual');
+  assert.equal(rec.cause, 'manual');
+  assert.ok(rec.netPnl > 0);
+});
+
+test('风控：最多3仓、同键去重、冷却', () => {
   const w = mkWallet();
   const base = { side: 'long', price: 100, margin: 500, leverage: 20, time: T0 };
   assert.ok(w.openPosition({ ...base, symbol: 'A', strategy: 's' }).id);
@@ -72,54 +81,64 @@ test('风控：最多3仓、同键去重、冷却、余额不足', () => {
   assert.ok(w.openPosition({ ...base, symbol: 'B', strategy: 's' }).id);
   assert.ok(w.openPosition({ ...base, symbol: 'C', strategy: 's' }).id);
   assert.ok(w.openPosition({ ...base, symbol: 'D', strategy: 's' }).rejected.includes('最大并存'));
-  // 平掉A后冷却生效
   w.closePosition(w.positions[0].id, 100, T0 + 100);
   assert.ok(w.openPosition({ ...base, symbol: 'A', strategy: 's', time: T0 + 200 }).rejected.includes('冷却'));
-  assert.ok(w.openPosition({ ...base, symbol: 'A', strategy: 's', time: T0 + 7 * 3600 }).id, '冷却期过后可再开');
+  assert.ok(w.openPosition({ ...base, symbol: 'A', strategy: 's', time: T0 + 7 * 3600 }).id);
 });
 
-test('PM下注与结算：命中按份额赔付，未中损失本金', () => {
+test('注资/出金/设置初始资金', () => {
   const w = mkWallet();
-  const bet = w.placePmBet({ winStart: 1000, side: 'up', cost: 0.5, stake: 100, time: T0 });
-  assert.ok(bet.shares === 200);
-  assert.equal(w.pmCash, 900);
-  assert.equal(w.placePmBet({ winStart: 1000, side: 'up', cost: 0.5, stake: 100, time: T0 }).rejected, '本窗口已下注');
-  const win = w.settlePmBet(1000, 'up');
-  assert.ok(win.won);
-  assert.ok(Math.abs(win.pnl - 100) < 1e-9); // 200份×$1 - $100
-  assert.ok(Math.abs(w.pmCash - 1100) < 1e-9);
-
-  w.placePmBet({ winStart: 2000, side: 'down', cost: 0.4, stake: 50, time: T0 });
-  const lose = w.settlePmBet(2000, 'up');
-  assert.ok(!lose.won);
-  assert.equal(lose.pnl, -50);
+  assert.equal(w.baseCapital, 10000);
+  assert.ok(w.addFunds(5000));
+  assert.equal(w.cash, 15000);
+  assert.equal(w.baseCapital, 15000, '注资抬高基准不虚增收益率');
+  assert.ok(w.withdrawFunds(3000));
+  assert.equal(w.cash, 12000);
+  assert.equal(w.baseCapital, 12000);
+  assert.ok(!w.withdrawFunds(99999), '出金不能超过可用现金');
+  assert.ok(w.setInitialCapital(20000));
+  assert.equal(w.cash, 20000);
+  assert.equal(w.baseCapital, 20000);
+  assert.equal(w.closed.length, 0, '设置初始资金清空历史');
+  assert.ok(!w.setInitialCapital(50), '初始资金下限100');
 });
 
-test('权益快照与每日/每小时收益', () => {
+test('每日收益复盘：只统计有真实平仓的日期', () => {
   const w = mkWallet();
   const day = 86400;
-  w.snapshotEquity(T0, {});
-  w.snapshotEquity(T0 + 3600, {});
-  w.pmCash += 100; // 模拟盈利
-  w.snapshotEquity(T0 + 2 * 3600, {});
-  w.cash -= 50;
-  w.snapshotEquity(T0 + day, {});
-  w.snapshotEquity(T0 + day + 3600, {});
+  // 第1天：开仓并止盈
+  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, target: 101, time: T0, strategy: 's' });
+  w.markPrice('BTC', 101, T0 + 600);
+  // 第2天：无任何交易
+  // 第3天：开仓并止损
+  w.openPosition({ symbol: 'ETH', side: 'long', price: 100, margin: 500, leverage: 20, stop: 99, time: T0 + 2 * day, strategy: 's' });
+  w.markPrice('ETH', 99, T0 + 2 * day + 600);
 
-  const hourly = w.hourlyReturns(24);
-  assert.ok(hourly.length >= 2);
-  const gain = hourly.find((h) => h.pnl > 99);
-  assert.ok(gain, '应捕捉到+100的小时');
-
-  const daily = w.dailyReturns();
-  assert.ok(daily.length >= 1);
-  assert.ok(typeof daily[0].retPct === 'number');
+  const daily = w.dailyTradeReturns();
+  assert.equal(daily.length, 2, '只有2个有平仓的日期，第2天无交易不记录');
+  assert.ok(daily[0].day > daily[1].day, '新在前');
+  const d1 = daily.find((d) => d.trades === 1 && d.pnl > 0);
+  const d3 = daily.find((d) => d.trades === 1 && d.pnl < 0);
+  assert.ok(d1 && d1.wins === 1);
+  assert.ok(d3 && d3.wins === 0);
+  assert.ok(typeof d1.roiPct === 'number');
 });
 
-test('equitySpot 含浮盈', () => {
+test('equitySpot 含浮盈与资金费', () => {
   const w = mkWallet();
   w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, time: T0, strategy: 's' });
   const eq = w.equitySpot({ BTC: 100.4 });
   // 现金=10000-500-5；持仓价值=500+10000*0.4%=540
   assert.ok(Math.abs(eq - (10000 - 500 - 5 + 500 + 40)) < 1e-9);
+});
+
+test('stats 汇总含费用', () => {
+  const w = mkWallet();
+  w.openPosition({ symbol: 'BTC', side: 'long', price: 100, margin: 500, leverage: 20, target: 101, time: T0, strategy: 's' });
+  w.markPrice('BTC', 101, T0 + 600);
+  const s = w.stats();
+  assert.equal(s.spotTrades, 1);
+  assert.equal(s.spotWins, 1);
+  assert.ok(s.totalFees > 0);
+  assert.ok(s.spotNetPnl > 0);
 });
