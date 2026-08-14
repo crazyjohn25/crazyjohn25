@@ -50,7 +50,7 @@ import { PaperWallet } from './wallet.js';
 import { ReportArchive, generateReport, generateDailyReview } from './report.js';
 import { getSettings, saveSettings } from './settings.js';
 import { notifyExternal, sendTelegram, sendEmail } from './notify.js';
-import { KOLS, fetchKolSignals } from './radar.js';
+import { KOLS, getKolList, fetchKolSignals } from './radar.js';
 
 /** 版本号：与 data/version.json 同步，旧部署会被远端更高版本强制引导到最新地址 */
 const APP_VERSION = 13;
