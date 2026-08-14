@@ -150,11 +150,5 @@ export function adaptWeights(stats, baseWeights) {
       reflections.push(`${tf}周期近${s.total}次命中率${pct}%表现好，小幅加权`);
     }
   }
-  const pm = stats['polymarket:5m'];
-  if (pm && pm.total >= 5 && pm.hitRate < 0.45) {
-    reflections.push(
-      `Polymarket 5m方向建议近${pm.total}次命中率${(pm.hitRate * 100).toFixed(0)}%，低于盈亏平衡，建议只在期望差值>10分时参与`
-    );
-  }
   return { weights, reflections };
 }

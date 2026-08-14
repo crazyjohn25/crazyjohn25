@@ -30,7 +30,7 @@ test('settle 按实际价格判定命中', () => {
 
 test('settle 方向错误判为miss', () => {
   const log = new ReviewLog({});
-  log.record({ source: 'polymarket:5m', symbol: 'BTC', direction: 'up', priceAtCall: 100, callTime: 0, evalTime: 100 });
+  log.record({ source: 'advisor:short', symbol: 'BTC', direction: 'up', priceAtCall: 100, callTime: 0, evalTime: 100 });
   const settled = log.settle(() => 98, 300);
   assert.equal(settled[0].outcome, 'miss');
 });
