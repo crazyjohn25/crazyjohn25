@@ -30,19 +30,47 @@
 28. **截图同款指标**（MT4趋势模板移植）：主图**均线彩带EMA10/30/60**（黄/蓝/红加粗）+**ZigZag摆动点标价**（ATR阈值枢轴，可开关）；副图新增**平滑STOCH(14,6,6)**（圆弧K/D，超买超卖滞留）与**WAE动能爆发**（动量柱vs布林带宽爆发线）；三者全部接入建议引擎（市场结构HH/HL判断、STOCH区间转折、动能有效性确认）。
 29. **回测逐笔明细**：取消代表案例，改为**时间升序全交易表**——进场/离场时间与价格、方向·周期、**杠杆**（30m→50x/2h→40x/4h→30x/12h→20x与钱包分档一致）、**单笔ROI**（含0.1%双边手续费）与**累计ROI**，周期汇总表含杠杆ROI合计。
 30. **建议1天复盘**：每轮建议额外登记"日度综合"预测（三策略均分净倾向），24小时后自动对照实际结算，命中率进入复盘面板（综合·1天复盘）。
+
+### v10 重构（当前版本）
+
+- **已删除**：Polymarket 5分钟全部功能（预测/回测/复盘/PM钱包）、旧策略回放式回测、每小时收益
+- **浅色主题**：全站浅色背景重设计，图表同步浅色
+- **资产信息**：每个交易对（BTC/ETH/SOL/BNB/HYPE/NDX/AAPL/NVDA/TSLA/MSTR）附介绍、类别与重点关注要点
+- **做市商Gamma环境**：Deribit公开期权数据，Black-Scholes计算GEX，正Gamma（震荡市）/负Gamma（趋势市）判断 + Call Wall/Put Wall 关键位（仅BTC/ETH）
+- **分析报告存档**：每次建议刷新生成结构化报告（技术面全指标+Gamma+新闻面+策略结论）存档，**每天10:00与23:00(UTC+8)自动生成日度复盘**并推送
+- **提醒系统**：页面弹窗+提示音+浏览器通知+**Telegram Bot/邮箱Webhook**（后台设置配置，支持测试发送）
+- **模拟钱包v3**：初始资金可设置（默认$10000）、注资/出金、**手动平仓按钮**、开仓时间显示、币安标准费率（taker 0.05%/边 + **资金费0.01%/8h**）、强平、**每天至少一单**（有合格信号时）、每日收益复盘只统计有真实平仓的日期
+- **AI交易复盘Tab**：只记录模拟钱包真实开仓（无开仓不记录），时间升序全明细（开平仓时间/价格/杠杆/原因/ROI）+ 基于真实结果的反思
+- **新闻源**：新增金十数据、ChainCatcher（链捕手），加上 The Block/CoinDesk/吴说/Foresight/PANews/AP/Yahoo/CoinTelegraph/Decrypt 共12+源
 14. **Serenity个股详情页**：点击任意推荐标的展开——公司全称/主营、**实时价格与52周高低**（Yahoo chart meta）、**市值/PE/PB**、赛道定位与排名、**主要竞品**、财报要点、**我方买入理由**（绿框）、**Challenge Serenity反方质疑**（红框）、以及该公司**最新新闻**（雅虎单股RSS + 谷歌检索）。
 15. **微观新闻增强**：新增雅虎财经、谷歌按品种的近2天专项检索，公司级最新消息更全更新。
 
-## 快速开始
+## 本地部署
 
 ```bash
-# 启动本地静态服务器（任选其一）
-npm start                     # 使用 python3 http.server，端口8080
-npx serve .                   # 或使用 serve
+# 1. 拉取代码
+git clone https://github.com/crazyjohn25/crazyjohn25.git
+cd crazyjohn25
+git checkout cursor/tradingview-macro-signals-bd5c
 
-# 浏览器打开
+# 2. 启动（任选其一）
+./start.sh              # Mac/Linux，默认8080端口
+start.bat               # Windows 双击或命令行运行
+npm start               # 或 python3 -m http.server 8080
+
+# 3. 浏览器打开
 http://localhost:8080
 ```
+
+纯静态站点，无需Node依赖、无需构建。所有数据（钱包/设置/报告/复盘）存在浏览器localStorage，本地部署即用。
+
+### 后台设置（页面右上角 ⚙ 设置）
+
+- **Telegram提醒**：[@BotFather](https://t.me/BotFather) 创建bot拿token → 给你的bot发条消息 → 访问 `https://api.telegram.org/bot<token>/getUpdates` 拿chat_id → 填入设置。重大信号/开平仓/每日复盘自动推送。
+- **邮箱提醒**：填入你的webhook地址（IFTTT/Zapier/自建服务），系统POST `{subject, text}`。
+- **钱包初始资金**：默认$10000，可自定义。
+- **X关注列表**：填入逗号分隔的X账号（参考你的关注列表），KOL雷达会纳入监控。
+- **Telegram频道**：默认 PANews/Foresight，可自行追加公开频道名。
 
 - 行情数据默认来自**币安公开API**（REST历史K线 + WebSocket实时推送，无需API Key）。
 - 若网络无法访问币安，自动降级为**本地模拟行情**离线演示，状态栏会显示"离线模式"。
