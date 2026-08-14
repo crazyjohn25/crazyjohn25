@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - cursor/tradingview-macro-signals-bd5c
   workflow_dispatch:
 
 permissions:
