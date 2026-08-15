@@ -472,6 +472,168 @@ export function wae(candles, { fast = 20, slow = 40, sensitivity = 150, bbPeriod
   return { momentum, explosion };
 }
 
+/**
+ * 抛物线SAR（抛物转向指标）
+ */
+export function parabolicSar(candles, { step = 0.02, max = 0.2 } = {}) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if (n < 2) return out;
+  let rising = candles[1].close >= candles[0].close;
+  let ep = rising ? candles[0].high : candles[0].low;
+  let af = step;
+  out[0] = rising ? candles[0].low : candles[0].high;
+  for (let i = 1; i < n; i++) {
+    const prev = out[i - 1];
+    let sar = prev + af * (ep - prev);
+    const c = candles[i];
+    if (rising) {
+      sar = Math.min(sar, candles[i - 1].low, i > 1 ? candles[i - 2].low : sar);
+      if (c.low < sar) {
+        rising = false;
+        sar = ep;
+        ep = c.low;
+        af = step;
+      } else {
+        if (c.high > ep) {
+          ep = c.high;
+          af = Math.min(af + step, max);
+        }
+      }
+    } else {
+      sar = Math.max(sar, candles[i - 1].high, i > 1 ? candles[i - 2].high : sar);
+      if (c.high > sar) {
+        rising = true;
+        sar = ep;
+        ep = c.high;
+        af = step;
+      } else {
+        if (c.low < ep) {
+          ep = c.low;
+          af = Math.min(af + step, max);
+        }
+      }
+    }
+    out[i] = sar;
+  }
+  return out;
+}
+
+/**
+ * 超级趋势 SuperTrend
+ */
+export function superTrend(candles, { period = 10, multiplier = 3 } = {}) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  const dir = new Array(n).fill(null);
+  if (n <= period) return { line: out, direction: dir };
+  const atrArr = atr(candles, period);
+  let upper = null;
+  let lower = null;
+  let trend = 1;
+  for (let i = period; i < n; i++) {
+    const c = candles[i];
+    const hl2 = (c.high + c.low) / 2;
+    const a = atrArr[i];
+    if (a === null) continue;
+    const basicUpper = hl2 + multiplier * a;
+    const basicLower = hl2 - multiplier * a;
+    upper = upper === null ? basicUpper : (basicUpper < upper || candles[i - 1].close > upper ? basicUpper : upper);
+    lower = lower === null ? basicLower : (basicLower > lower || candles[i - 1].close < lower ? basicLower : lower);
+    if (trend === 1) {
+      if (c.close < lower) trend = -1;
+    } else {
+      if (c.close > upper) trend = 1;
+    }
+    out[i] = trend === 1 ? lower : upper;
+    dir[i] = trend;
+  }
+  return { line: out, direction: dir };
+}
+
+/** 累计成交量差（CVD）：收盘价涨记+量，跌记-量 */
+export function cvdSeries(candles) {
+  const out = new Array(candles.length).fill(null);
+  let cum = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    if (i === 0) out[i] = 0;
+    else if (c.close > candles[i - 1].close) cum += c.volume;
+    else if (c.close < candles[i - 1].close) cum -= c.volume;
+    out[i] = cum;
+  }
+  return out;
+}
+
+/**
+ * Volume Profile 成交量分布
+ */
+export function volumeProfile(candles, { bins = 24, lookback = 120 } = {}) {
+  const n = candles.length;
+  if (n === 0) return null;
+  const start = Math.max(0, n - lookback);
+  const slice = candles.slice(start);
+  let min = Infinity;
+  let max = -Infinity;
+  for (const c of slice) {
+    if (c.low < min) min = c.low;
+    if (c.high > max) max = c.high;
+  }
+  if (max <= min) return null;
+  const step = (max - min) / bins;
+  const rows = Array.from({ length: bins }, (_, i) => ({ price: min + step * (i + 0.5), low: min + step * i, high: min + step * (i + 1), volume: 0 }));
+  for (const c of slice) {
+    const tp = (c.high + c.low + c.close) / 3;
+    const idx = Math.min(bins - 1, Math.max(0, Math.floor((tp - min) / step)));
+    rows[idx].volume += c.volume;
+  }
+  const poc = rows.reduce((a, b) => (b.volume > a.volume ? b : a), rows[0]);
+  const total = rows.reduce((s, r) => s + r.volume, 0);
+  let acc = 0;
+  let vaLow = min;
+  let vaHigh = max;
+  for (const r of rows) {
+    acc += r.volume;
+    if (acc >= total * 0.3) { vaLow = r.low; }
+    if (acc >= total * 0.7) { vaHigh = r.high; break; }
+  }
+  const last = candles[n - 1].close;
+  const above = rows.filter((r) => r.price > last).sort((a, b) => b.volume - a.volume)[0] || null;
+  const below = rows.filter((r) => r.price < last).sort((a, b) => b.volume - a.volume)[0] || null;
+  return { poc: poc.price, vaLow, vaHigh, hvnAbove: above ? above.price : null, hvnBelow: below ? below.price : null, nodes: rows };
+}
+
+/**
+ * 清算簇估计（基于K线范围 + Sosovalue类清算热力图结构）
+ * 在 lookback 内取价格分箱，按簇强度排序。
+ */
+export function liquidationClusters(candles, { bins = 18, lookback = 96 } = {}) {
+  const n = candles.length;
+  if (n === 0) return [];
+  const start = Math.max(0, n - lookback);
+  const slice = candles.slice(start);
+  let min = Infinity;
+  let max = -Infinity;
+  for (const c of slice) {
+    if (c.low < min) min = c.low;
+    if (c.high > max) max = c.high;
+  }
+  if (max <= min) return [];
+  const step = (max - min) / bins;
+  const binsArr = Array.from({ length: bins }, (_, i) => ({ price: min + step * (i + 0.5), low: min + step * i, high: min + step * (i + 1), intensity: 0 }));
+  for (const c of slice) {
+    const range = c.high - c.low;
+    const mid = (c.high + c.low + c.close) / 3;
+    const idx = Math.min(bins - 1, Math.max(0, Math.floor((mid - min) / step)));
+    binsArr[idx].intensity += range * (1 + Math.abs(c.close - c.open) / (range || 1)) * Math.log10(c.volume + 1);
+  }
+  return binsArr
+    .filter((b) => b.intensity > 0)
+    .sort((a, b) => b.intensity - a.intensity)
+    .slice(0, 6)
+    .map((b) => ({ price: b.price, intensity: +b.intensity.toFixed(2) }));
+}
+
 /** 一次性计算全部指标，供图表与信号引擎复用 */
 export function computeAll(candles, params = {}) {
   const closes = candles.map((c) => c.close);
@@ -496,5 +658,10 @@ export function computeAll(candles, params = {}) {
     stoch: stochSmooth(candles),
     wae: wae(candles),
     swings: zigzag(candles),
+    sar: parabolicSar(candles),
+    super: superTrend(candles),
+    cvd: cvdSeries(candles),
+    vp: volumeProfile(candles),
+    liquidation: liquidationClusters(candles),
   };
 }

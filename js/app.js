@@ -1,7 +1,7 @@
 /**
  * 页面主逻辑：图表渲染、实时数据、指标叠加、事件标注、信号报警、
- * 三层策略建议、分析报告存档、每日两次复盘、模拟交易钱包、AI交易复盘、
- * 做市商Gamma环境、KOL雷达、Serenity跟踪
+ * 三层策略建议、每日23点基本面日报、模拟交易钱包、AI交易复盘、
+ * 做市商Gamma环境、KOL雷达、Sosovalue数据融合
  */
 import { computeAll } from './indicators.js';
 import { generateSignals, AlertManager } from './signals.js';
@@ -23,38 +23,22 @@ import {
 import { hourlyVolumeStats, rolling24hVolume, formatVolume } from './volume.js';
 import { detectCandleAnomalies, WhaleFeed } from './anomaly.js';
 import { fetchNews } from './news.js';
-import { runAdvisor, STRATEGIES, MAJOR_THRESHOLD } from './advisor.js';
+import { runAdvisor, STRATEGIES, MAJOR_THRESHOLD, analyzeTimeframe } from './advisor.js';
 import { ReviewLog } from './review.js';
 import { interpret } from './interpret.js';
-import {
-  SERENITY_PICKS,
-  INDUSTRIES,
-  NARRATIVES,
-  SERENITY_PROFILE,
-  SERENITY_DATA_UPDATED,
-  buildSerenityIndex,
-  buildSubIndices,
-  fetchSerenityFeed,
-  scorePick,
-} from './serenity.js';
-import {
-  fetchDailyBatch,
-  snapshotBatch,
-  fetchQuoteMeta,
-  fetchCompanyNews,
-} from './stocks.js';
-import { getCompany } from './companies.js';
 import { getAssetInfo } from './assets.js';
 import { fetchGex, explainGex } from './gamma.js';
 import { PaperWallet, leverageFromScore } from './wallet.js';
-import { ReportArchive, generateReport, generateDailyReview } from './report.js';
+import { ReportArchive, generateReport, generateDailyReport } from './report.js';
 import { SignalArchive } from './archive.js';
 import { getSettings, saveSettings } from './settings.js';
 import { notifyExternal, sendTelegram, sendEmail } from './notify.js';
 import { getKolList, fetchKolSignals } from './radar.js';
+import { fetchSosoValue, describeSoso } from './sosovalue.js';
+import { strategyOne, strategyTwo } from './strategies-report.js';
 
 /** 版本号：与 data/version.json 同步，旧部署会被远端更高版本强制引导到最新地址 */
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 
 const $ = (id) => document.getElementById(id);
 
@@ -65,6 +49,9 @@ const SUB_LABELS = {
   wae: 'WAE动能爆发 — 动量柱vs爆发线',
   dmi: 'DMI(14) — 动向指标（+DI/-DI/ADX）',
   obv: 'OBV — 能量潮（累计成交量）',
+  sar: 'SAR — 抛物线转向',
+  super: 'SUPER — 超级趋势',
+  cvd: 'CVD — 累计成交量差',
 };
 
 const state = {
@@ -72,12 +59,18 @@ const state = {
   interval: '1h',
   candles: [],
   candles1h: [],
+  candles30m: [],
+  candles4h: [],
+  candles1d: [],
   indicators: null,
   signals: [],
   anomalies: [],
   newsEvents: [],
   advice: null,
   gamma: null,
+  soso: null,
+  strategy1: null,
+  strategy2: null,
   unsubscribe: null,
   unsubWhale: null,
   usingMock: false,
@@ -344,6 +337,9 @@ const SUB_INDICATOR_LINES = {
     { color: '#d97706', pick: (ind) => ind.dmi.adx },
   ],
   obv: [{ color: '#7c3aed', pick: (ind) => ind.obv }],
+  sar: [{ color: '#0891b2', pick: (ind) => ind.sar }],
+  super: [{ color: '#dc2626', pick: (ind) => ind.super.line }],
+  cvd: [{ color: '#059669', pick: (ind) => ind.cvd }],
 };
 
 function renderSubIndicator() {
@@ -414,6 +410,9 @@ async function refreshAdvisorAndVolume() {
     if (state.usingMock) return generateMockHistory(tf, tf === '1d' ? 250 : 400);
     const c = await fetchHistory(state.symbol, tf, tf === '1d' ? 250 : 400);
     if (tf === '1h') state.candles1h = c;
+    if (tf === '30m') state.candles30m = c;
+    if (tf === '4h') state.candles4h = c;
+    if (tf === '1d') state.candles1d = c;
     return c;
   };
 
@@ -427,12 +426,35 @@ async function refreshAdvisorAndVolume() {
   } catch (_) {
     state.advice = null;
   }
-  if (state.usingMock) state.candles1h = generateMockHistory('1h', 400);
+  if (state.usingMock) {
+    state.candles1h = generateMockHistory('1h', 400);
+    state.candles30m = generateMockHistory('30m', 400);
+    state.candles4h = generateMockHistory('4h', 400);
+    state.candles1d = generateMockHistory('1d', 250);
+  }
+
+  // 拉取 Sosovalue（尽力而为，失败不阻塞）
+  fetchSosoValue().then((d) => { state.soso = d; renderSosoBox(); }).catch(() => {});
+
+  state.strategy1 = strategyOne({
+    symbol: state.symbol,
+    candles1d: state.candles1d,
+    candles1h: state.candles1h,
+    candles30m: state.candles30m,
+    newsBias: computeNewsBias(),
+    soso: state.soso,
+  });
+  state.strategy2 = strategyTwo({
+    symbol: state.symbol,
+    candles1h: state.candles1h,
+    candles4h: state.candles4h,
+    candles1d: state.candles1d,
+  });
 
   recordAdvisorPredictions();
   handleMajorSignals();
-  archiveReport();
   renderAdvisor();
+  renderStrategyCards();
   renderVolumePanel();
   renderReviewPanel();
   renderWalletTab();
@@ -485,7 +507,10 @@ function handleMajorSignals() {
   const now = Math.floor(Date.now() / 1000);
   for (const st of adv.strategies) {
     if (!st.major || !st.plan) continue;
-    if (st.plan.rr !== null && st.plan.rr < 1) continue;
+    // 高确定性过滤：评分≥阈值+0.5、盈亏比≥2、置信度≥0.85
+    if (Math.abs(st.score) < MAJOR_THRESHOLD + 0.5) continue;
+    if (st.plan.rr !== null && st.plan.rr < 2) continue;
+    if (st.conf < 0.85) continue;
     const rec = signalArchive.consider({
       symbol: state.symbol,
       strategy: st.key,
@@ -499,7 +524,7 @@ function handleMajorSignals() {
       time: now,
     });
     if (!rec) continue;
-    const lev = leverageFromScore(Math.abs(st.score), MAJOR_THRESHOLD);
+    const lev = leverageFromScore(Math.abs(st.score), MAJOR_THRESHOLD + 0.5);
     pushAlert({
       key: `major|${rec.fingerprint}|${rec.id}`,
       title: `⚡强烈信号 ${getSymbol(state.symbol).label} ${st.label}：${st.action}`,
@@ -518,6 +543,9 @@ function handleMajorSignals() {
       reason: `${st.label} ${st.action}（评分${st.score.toFixed(1)}）`,
       time: now,
       strategy: st.key,
+      signalId: rec.id,
+      signalScore: st.score,
+      plan: st.plan,
     });
     if (res && !res.rejected) {
       pushAlert({
@@ -946,44 +974,111 @@ async function refreshGamma() {
   );
 }
 
-// ---------------- 分析报告存档 + 每日两次复盘 ----------------
+function renderStrategyCards() {
+  const box = $('strategyBox');
+  if (!box) return;
+  const s1 = state.strategy1;
+  const s2 = state.strategy2;
+  const sec = (obj) =>
+    (obj.sections || [])
+      .map((s) => `<div class="rpt-sec"><b>${escapeHtml(s.title)}</b><ul>${(s.lines || []).map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul></div>`)
+      .join('');
+  box.innerHTML =
+    (s1
+      ? `<div class="st-card major"><div class="st-head"><span class="st-label">策略1：体制/位置/确认/执行</span><span class="action ${actionClass(s1.verdict)}">${escapeHtml(s1.verdict)}</span></div>` +
+        `<div class="sy-note">综合得分 ${s1.totalScore} · 周线趋势 + 宏观/资金费率 + VP/VWAP/清算簇 + CVD/OI + 量能执行</div>` +
+        sec(s1) +
+        `</div>`
+      : '<div class="advisor-loading">策略1计算中…</div>') +
+    (s2
+      ? `<div class="st-card"><div class="st-head"><span class="st-label">策略2：指标分组（EMA/MACD/RSI/SUPER/SAR/KDJ/OBV/DMI）</span><span class="action ${actionClass(s2.verdict)}">${escapeHtml(s2.verdict)}</span></div>` +
+        `<div class="sy-note">综合得分 ${s2.totalScore} · 趋势/动量/震荡/量能四组独立打分</div>` +
+        sec(s2) +
+        `</div>`
+      : '<div class="advisor-loading">策略2计算中…</div>');
+}
 
-function archiveReport() {
-  const adv = state.advice;
-  if (!adv) return;
-  const price = state.candles.length ? state.candles[state.candles.length - 1].close : null;
-  const report = generateReport({
+// ---------------- 每日23点基本面日报 ----------------
+
+const dailyDone = new Set();
+function checkDailyReport() {
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const hh = now.getUTCHours();
+  const mm = now.getUTCMinutes();
+  const dayKey = now.toISOString().slice(0, 10);
+  const key = `${dayKey}|23`;
+  if (hh === 23 && mm < 2 && !dailyDone.has(key)) {
+    dailyDone.add(key);
+    runDailyReport();
+  }
+}
+
+async function runDailyReport() {
+  if (state.usingMock) return;
+  // 先拉齐 30m/1h/4h/日线 与 Sosovalue
+  const [c30, c1h, c4h, c1d, soso] = await Promise.all([
+    fetchHistory(state.symbol, '30m', 400).catch(() => generateMockHistory('30m', 400)),
+    fetchHistory(state.symbol, '1h', 400).catch(() => generateMockHistory('1h', 400)),
+    fetchHistory(state.symbol, '4h', 400).catch(() => generateMockHistory('4h', 400)),
+    fetchHistory(state.symbol, '1d', 250).catch(() => generateMockHistory('1d', 250)),
+    fetchSosoValue().catch(() => null),
+  ]);
+  state.candles30m = c30;
+  state.candles1h = c1h;
+  state.candles4h = c4h;
+  state.candles1d = c1d;
+  state.soso = soso;
+  renderSosoBox();
+  state.strategy1 = strategyOne({ symbol: state.symbol, candles1d: c1d, candles1h: c1h, candles30m: c30, newsBias: computeNewsBias(), soso });
+  state.strategy2 = strategyTwo({ symbol: state.symbol, candles1h: c1h, candles4h: c4h, candles1d: c1d });
+
+  const perTf = {
+    '30m': analyzeTimeframe(c30),
+    '1h': analyzeTimeframe(c1h),
+    '4h': analyzeTimeframe(c4h),
+    '1d': analyzeTimeframe(c1d),
+  };
+  const report = generateDailyReport({
+    dateLabel: '23:00',
     symbol: state.symbol,
     symbolLabel: getSymbol(state.symbol).label,
-    price,
-    strategies: adv.strategies,
-    perTf: adv.perTf,
-    gamma: state.gamma,
+    price: c1d[c1d.length - 1].close,
+    perTf,
+    strategy1: state.strategy1,
+    strategy2: state.strategy2,
+    soso,
     newsBias: computeNewsBias(),
+    topNews: state.newsEvents.slice(0, 5),
+    reflections: state.reflections,
   });
   reports.add(report);
   renderReports();
+  pushAlert({
+    key: `dailyreport|${report.time}`,
+    title: `每日基本面日报（23:00）${getSymbol(state.symbol).label}`,
+    body: report.summary,
+    kind: 'risk',
+    external: true,
+  });
 }
 
 function renderReports() {
   const box = $('reportBox');
-  const recent = reports.recent(10);
-  if (!recent.length) {
-    setHtmlIfChanged(box, '<div class="advisor-loading">暂无报告</div>');
+  const list = reports.recent(8);
+  if (!list.length) {
+    setHtmlIfChanged(box, '<div class="advisor-loading">每天 23:00（UTC+8）自动生成基本面日报并推送；打开页面不会自动生成。</div>');
     return;
   }
   setHtmlIfChanged(
     box,
-    recent
+    list
       .map((r) => {
         const secs = (r.sections || [])
-          .map((s) =>
-            `<div class="rpt-sec"><b>${escapeHtml(s.title)}</b><ul>${(s.lines || []).map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul></div>`
-          )
+          .map((s) => `<div class="rpt-sec"><b>${escapeHtml(s.title)}</b><ul>${(s.lines || []).map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul></div>`)
           .join('');
         return (
           `<div class="rpt-card"><details><summary class="rpt-head">` +
-          `<span>${escapeHtml(r.symbolLabel)} @${r.price ? r.price.toFixed(1) : '-'}</span>` +
+          `<span>${escapeHtml(r.symbolLabel)} ${r.type === 'daily-report' ? '日报' : '报告'} @${r.price ? r.price.toFixed(1) : '-'}</span>` +
           `<span>${formatTime(r.time)}</span></summary>` +
           `<div class="rpt-body">${secs}</div></details></div>`
         );
@@ -992,67 +1087,24 @@ function renderReports() {
   );
 }
 
-/** 每日两次复盘：UTC+8 10:00 与 23:00 */
-const reviewDone = new Set();
-function checkDailyReview() {
-  const now = new Date(Date.now() + 8 * 3600 * 1000);
-  const hh = now.getUTCHours();
-  const mm = now.getUTCMinutes();
-  const dayKey = now.toISOString().slice(0, 10);
-  for (const target of [10, 23]) {
-    const key = `${dayKey}|${target}`;
-    if (hh === target && mm < 2 && !reviewDone.has(key)) {
-      reviewDone.add(key);
-      runDailyReview(target);
-    }
-  }
-}
+// ---------------- Sosovalue 数据面板 ----------------
 
-function runDailyReview(hour) {
-  const today = Math.floor((Math.floor(Date.now() / 1000) + 8 * 3600) / 86400);
-  const todayReports = reports.ofDay(today);
-  const todayStart = (today * 86400 - 8 * 3600);
-  const closedToday = wallet.closed.filter((t) => t.exitTime >= todayStart);
-  const topNews = state.newsEvents.slice(0, 3);
-  const review = generateDailyReview({
-    dateLabel: `${hour}:00`,
-    reports: todayReports,
-    walletStats: wallet.stats(),
-    closedToday,
-    topNews,
-    reflections: state.reflections,
-  });
-  reports.add({ ...review, symbol: state.symbol, symbolLabel: '每日复盘', sections: [{ title: '复盘', lines: review.lines }] });
-  renderReports();
-  renderDailyReviewBox();
-  pushAlert({
-    key: `dailyreview|${review.time}`,
-    title: `每日复盘（${hour === 10 ? '早上10点' : '晚上11点'}）`,
-    body: review.lines.join('\n'),
-    kind: 'risk',
-    external: true,
-  });
-}
-
-function renderDailyReviewBox() {
-  const box = $('dailyReviewBox');
-  const reviews = reports.reports.filter((r) => r.type === 'daily-review').slice(-6).reverse();
-  if (!reviews.length) {
-    setHtmlIfChanged(box, '<div class="advisor-loading">每天 10:00 / 23:00 (UTC+8) 自动生成并推送</div>');
+function renderSosoBox() {
+  const box = $('sosoBox');
+  if (!box) return;
+  const d = state.soso;
+  if (!d) {
+    setHtmlIfChanged(box, '<div class="advisor-loading">Sosovalue 暂不可用（无开放 API/CORS受限），已用本地清算簇/资金费率钩子替代；接入代理后自动展示。</div>');
     return;
   }
-  setHtmlIfChanged(
-    box,
-    reviews
-      .map((r) =>
-        `<div class="rpt-card"><div class="rpt-head"><span><b>${escapeHtml(r.dateLabel)}</b> 复盘</span><span>${formatTime(r.time)}</span></div>` +
-        `<div class="rpt-body"><ul>${r.lines.map((l) => `<li>${escapeHtml(l)}</li>`).join('')}</ul></div></div>`
-      )
-      .join('')
-  );
+  const rows = [];
+  if (d.fundingRate !== null && d.fundingRate !== undefined) rows.push(`<div class="rv-stat"><span>资金费率</span><span>${(d.fundingRate * 100).toFixed(4)}%</span></div>`);
+  if (d.openInterest !== null && d.openInterest !== undefined) rows.push(`<div class="rv-stat"><span>未平仓量(OI)</span><span>${d.openInterest}</span></div>`);
+  if (d.volume24h !== null && d.volume24h !== undefined) rows.push(`<div class="rv-stat"><span>24h交易量</span><span>${d.volume24h}</span></div>`);
+  if (d.liquidation) rows.push(`<div class="rv-stat"><span>清算热力图</span><span>已解析</span></div>`);
+  if (d.news && d.news.length) rows.push(`<div class="rv-reflect">${d.news.map(escapeHtml).join(' | ')}</div>`);
+  setHtmlIfChanged(box, rows.length ? rows.join('') : `<div class="sy-note">${escapeHtml(describeSoso(d))}</div>`);
 }
-
-// ---------------- 模拟交易钱包 ----------------
 
 function walletMark(symbol, price) {
   const closed = wallet.markPrice(symbol, price, Math.floor(Date.now() / 1000));
@@ -1091,12 +1143,12 @@ function renderWalletTab() {
             `<span><b>${escapeHtml(p.symbol)}</b> ${p.side === 'long' ? '做多' : '做空'} ${p.leverage}x <span class="sy-note">保证金$${p.margin}</span></span>` +
             `<span class="${cls}">${u >= 0 ? '+' : ''}$${u.toFixed(1)}（${((u / p.margin) * 100).toFixed(0)}%）</span></div>` +
             `<div class="sy-note">开仓 ${formatTime(p.openTime)} @${p.entry.toFixed(1)} · 现价${px.toFixed(1)} · 止损${p.stop !== null ? p.stop.toFixed(1) : '-'} · 目标${p.target !== null ? p.target.toFixed(1) : '-'} · 已付资金费$${(p.fundingPaid || 0).toFixed(2)}</div>` +
-            `<div class="sy-note">策略：${escapeHtml(p.reason)}</div>` +
+            `<div class="sy-note">策略：${escapeHtml(p.reason)}${p.signalScore ? ` · 信号评分${p.signalScore.toFixed(1)}` : ''}</div>` +
             `<button class="pos-close-btn" data-pid="${p.id}">手动平仓</button></div>`
           );
         })
         .join('')
-    : '<div class="sy-note">当前无持仓（只在高置信信号出现时开仓，不频繁交易）</div>';
+    : '<div class="sy-note">当前无持仓（只在高置信强烈信号出现时开仓，不频繁交易）</div>';
 
   const daily = wallet.dailyTradeReturns(14);
   const dailyHtml = daily.length
@@ -1173,6 +1225,8 @@ function renderAiReview() {
         `<td>${t.exit.toFixed(1)}</td>` +
         `<td>${t.leverage}x</td>` +
         `<td>${causeLabel}</td>` +
+        `<td>${t.signalScore ? t.signalScore.toFixed(1) : '-'}</td>` +
+        `<td>$${(t.openFee + t.closeFee + (t.funding || 0)).toFixed(2)}</td>` +
         `<td class="${cls}">${t.netPnl >= 0 ? '+' : ''}$${t.netPnl.toFixed(1)}</td>` +
         `<td class="${cls}">${t.roiPct >= 0 ? '+' : ''}${t.roiPct.toFixed(0)}%</td></tr>`
       );
@@ -1202,184 +1256,12 @@ function renderAiReview() {
       (reflections.length ? `<div class="rv-reflect"><b>反思：</b>${reflections.map(escapeHtml).join('；')}</div>` : '') +
       `<div class="bt-htitle" style="margin-top:8px">全部交易明细（时间升序 · ${closed.length}笔）</div>` +
       `<div class="bt-scroll"><table class="sy-table"><thead>` +
-      `<tr><th>开仓时间</th><th>品种·方向</th><th>开仓价</th><th>平仓时间</th><th>平仓价</th><th>杠杆</th><th>平仓原因</th><th>净盈亏</th><th>ROI</th></tr>` +
+      `<tr><th>开仓时间</th><th>品种·方向</th><th>开仓价</th><th>平仓时间</th><th>平仓价</th><th>杠杆</th><th>平仓原因</th><th>信号评分</th><th>总费用</th><th>净盈亏</th><th>ROI</th></tr>` +
       `</thead><tbody>${rows}</tbody></table></div>`
   );
 }
 
-// ---------------- Serenity ----------------
-
-let serenityLoaded = false;
-
-async function refreshSerenity() {
-  if (serenityLoaded) return;
-  serenityLoaded = true;
-  const tickers = [...new Set(SERENITY_PICKS.map((p) => p.ticker))];
-  const snap = await snapshotBatch(tickers);
-  renderSerenity(snap, 'snapshot');
-  try {
-    const live = await fetchDailyBatch(tickers);
-    const liveCount = Object.values(live).filter(Boolean).length;
-    if (liveCount >= tickers.length / 2) {
-      for (const t of tickers) if (!live[t]) live[t] = snap[t];
-      renderSerenity(live, 'live');
-    }
-  } catch (_) { /* 保持快照渲染 */ }
-}
-
-function renderSerenity(daily, mode) {
-  const subs = buildSubIndices(daily);
-  const subBox = $('serenitySubBox');
-  if (subs.length) {
-    subBox.innerHTML = subs
-      .map((s) => {
-        const cls = s.index.changePct >= 0 ? 'good' : 'bad';
-        return (
-          `<div class="rv-stat"><span><span class="sy-tag" style="background:${s.color}">${s.label}</span> ` +
-          `<span class="sy-note">${s.tickers.join(' ')}</span></span>` +
-          `<span class="rv-rate ${cls}">${s.index.current.toFixed(1)}（${s.index.changePct >= 0 ? '+' : ''}${s.index.changePct.toFixed(1)}%）</span></div>`
-        );
-      })
-      .join('') +
-      `<div class="sy-note" style="margin-top:3px">子指数=该行业成分等权、基期100</div>`;
-  } else {
-    subBox.innerHTML = '<div class="advisor-loading">行情不足，无法合成子指数</div>';
-  }
-
-  const idx = buildSerenityIndex(daily);
-  const idxBox = $('serenityIndexBox');
-  if (idx) {
-    const cls = idx.changePct >= 0 ? 'up' : 'down';
-    const step = Math.ceil(idx.series.length / 20);
-    const spark = idx.series
-      .map((p, i) => (i % step === 0 || i === idx.series.length - 1 ? p.value.toFixed(1) : null))
-      .filter(Boolean)
-      .join(' → ');
-    idxBox.innerHTML =
-      `<span class="sy-idx ${cls}">${idx.current.toFixed(2)}</span> ` +
-      `<span class="rv-rate ${cls === 'up' ? 'good' : 'bad'}">${idx.changePct >= 0 ? '+' : ''}${idx.changePct.toFixed(2)}% / 30天</span>` +
-      `<div class="sy-note">覆盖${idx.covered}/${idx.total}只成分 · 等权重 · 基期=100 · ${mode === 'snapshot' ? '内置快照数据' : '实时数据'}</div>` +
-      `<div class="sy-note">走势：${spark}</div>`;
-  } else {
-    idxBox.innerHTML = '<div class="advisor-loading">行情不可用，无法合成指数</div>';
-  }
-
-  const rows = SERENITY_PICKS.map((p) => {
-    const d = daily[p.ticker];
-    const { score, perf30 } = scorePick(p, d ? d.candles : null);
-    return { ...p, score, perf30 };
-  }).sort((a, b) => b.score - a.score);
-
-  const box = $('serenityPicksBox');
-  box.innerHTML =
-    rows
-      .map((r) => {
-        const ind = INDUSTRIES[r.industry];
-        const perfCls = r.perf30 === null ? '' : r.perf30 >= 0 ? 'up' : 'down';
-        const co = getCompany(r.ticker);
-        return (
-          `<div class="sy-pick" data-ticker="${escapeHtml(r.ticker)}">` +
-          `<div class="sy-pick-head">` +
-          `<span><b>${escapeHtml(r.ticker)}</b>${r.disclosed ? ' ◆' : ''} <span class="sy-note">${escapeHtml(co.cn)}</span></span>` +
-          `<span><span class="sy-tag" style="background:${ind.color}">${ind.label}</span> ` +
-          `<span class="${perfCls}">${r.perf30 === null ? '-' : (r.perf30 >= 0 ? '+' : '') + r.perf30.toFixed(1) + '%'}</span> ` +
-          `<span class="sy-score">${r.score.toFixed(1)}</span></span>` +
-          `</div><div class="sy-detail" id="syd-${escapeHtml(r.ticker)}"></div></div>`
-        );
-      })
-      .join('') +
-    `<div class="sy-note" style="margin-top:4px">◆=本人公开披露持仓 · 评分=叙事权重×2+30天动量+披露加成 · 点击展开详情</div>`;
-
-  box.querySelectorAll('.sy-pick-head').forEach((head) => {
-    head.addEventListener('click', () => {
-      const pick = head.parentElement;
-      const ticker = pick.dataset.ticker;
-      const detail = $(`syd-${ticker}`);
-      const open = detail.classList.toggle('open');
-      if (open && !detail.dataset.loaded) {
-        detail.dataset.loaded = '1';
-        renderCompanyDetail(ticker, detail, rows.find((x) => x.ticker === ticker));
-      }
-    });
-  });
-
-  const pr = SERENITY_PROFILE;
-  $('serenityProfileBox').innerHTML =
-    `<div class="rv-stat"><span>持股数据更新于</span><span>${formatTime(SERENITY_DATA_UPDATED)}</span></div>` +
-    `<div class="rv-stat"><span>账号</span><span><a href="${pr.url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${pr.handle}</a>（${pr.followers}粉丝）</span></div>` +
-    `<div class="rv-stat"><span>风格</span><span>${escapeHtml(pr.style)}</span></div>` +
-    `<div class="interp"><b>核心框架：</b>${escapeHtml(pr.framework)}</div>` +
-    `<div class="interp"><b>代表战绩：</b>${escapeHtml(pr.record)}</div>` +
-    `<div class="rv-reflect">${escapeHtml(pr.risk)}</div>`;
-}
-
-async function renderCompanyDetail(ticker, el, pick) {
-  const co = getCompany(ticker);
-  const nar = pick ? NARRATIVES[pick.narrative].label : '-';
-  el.innerHTML =
-    `<div class="co-name">${escapeHtml(co.name)}（${escapeHtml(co.cn)}）</div>` +
-    `<div class="co-desc">${escapeHtml(co.desc)}</div>` +
-    `<div class="co-quote" id="coq-${escapeHtml(ticker)}"><span class="sy-note">加载实时行情…</span></div>` +
-    `<table class="co-fund"><tbody>` +
-    `<tr><td>市值</td><td>${escapeHtml(co.mcap)}</td><td>市盈率PE</td><td>${escapeHtml(co.pe)}</td></tr>` +
-    `<tr><td>市净率PB</td><td>${escapeHtml(co.pb)}</td><td>叙事定位</td><td>${escapeHtml(nar)}</td></tr>` +
-    `</tbody></table>` +
-    `<div class="co-sec"><b>赛道定位与排名：</b>${escapeHtml(co.rank)}</div>` +
-    `<div class="co-sec"><b>主要竞品：</b>${co.peers.map((p) => `<span class="co-peer">${escapeHtml(p)}</span>`).join('')}</div>` +
-    `<div class="co-sec"><b>财报要点：</b>${escapeHtml(co.financials)}</div>` +
-    `<div class="interp co-bull"><b>为什么买它（我方逻辑）：</b>${escapeHtml(co.bull)}</div>` +
-    `<div class="rv-reflect co-challenge"><b>Challenge Serenity（反方质疑）：</b>${escapeHtml(co.challenge)}</div>` +
-    `<div class="co-news" id="con-${escapeHtml(ticker)}"><span class="sy-note">加载公司新闻…</span></div>`;
-
-  fetchQuoteMeta(ticker)
-    .then((q) => {
-      const qe = $(`coq-${ticker}`);
-      if (!qe) return;
-      if (!q) { qe.innerHTML = '<span class="sy-note">实时行情不可达</span>'; return; }
-      const range = q.high52 && q.low52
-        ? ` · 52周 ${q.low52.toFixed(2)}~${q.high52.toFixed(2)}（距高点${(((q.price - q.high52) / q.high52) * 100).toFixed(0)}%）`
-        : '';
-      qe.innerHTML = `<span class="co-price">${q.price.toFixed(2)} ${escapeHtml(q.currency)}</span><span class="sy-note">${range}</span>`;
-    })
-    .catch(() => {});
-
-  fetchCompanyNews(ticker, co.name)
-    .then((items) => {
-      const ne = $(`con-${ticker}`);
-      if (!ne) return;
-      if (!items.length) { ne.innerHTML = '<span class="sy-note">暂无公司新闻或网络受限</span>'; return; }
-      ne.innerHTML =
-        `<div class="co-news-h">最新公司新闻</div>` +
-        items.slice(0, 6).map((it) =>
-          `<div class="co-news-i"><a href="${escapeHtml(it.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(it.title)}</a>` +
-          `<span class="sy-note"> · ${escapeHtml(it.source)} · ${formatTime(it.time)}</span></div>`
-        ).join('');
-    })
-    .catch(() => {});
-}
-
-async function refreshSerenityFeed() {
-  const box = $('serenityFeedBox');
-  const items = await fetchSerenityFeed();
-  if (!items.length) {
-    setHtmlIfChanged(box, '<div class="advisor-loading">暂无近3天动态或网络受限</div>');
-    return;
-  }
-  setHtmlIfChanged(
-    box,
-    items
-      .map((it) => {
-        const itp = interpret(it.title);
-        return (
-          `<div class="co-news-i"><span class="bias ${itp.bias}">${itp.biasLabel}</span>` +
-          `<a href="${escapeHtml(it.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(it.title)}</a>` +
-          `<span class="sy-note"> · ${formatTime(it.time)}</span></div>`
-        );
-      })
-      .join('') +
-      `<div class="sy-note" style="margin-top:4px">X推文API需付费，无法直接抓取@aleabitoreddit实时推文；本面板监控其重点标的公开新闻作为替代信号。</div>`
-  );
-}
+// ---------------- Serenity（已删除） ----------------
 
 // ---------------- 多品种后台信号监控 ----------------
 
@@ -1407,38 +1289,7 @@ async function watchAllSymbols() {
           body: s.reasons.join('；'),
           kind: s.side,
         });
-        if (s.score >= 4) {
-          const atrArr = ind.atr;
-          const atrV = atrArr[atrArr.length - 1] ?? atrArr[atrArr.length - 2];
-          if (atrV) {
-            const entry = candles[candles.length - 1].close;
-            const long = s.side === 'buy';
-            const lev = leverageFromScore(s.score, 4);
-            const res = wallet.openPosition({
-              symbol: sym.id,
-              side: long ? 'long' : 'short',
-              price: entry,
-              margin: 500,
-              leverage: lev,
-              stop: long ? entry - 1.5 * atrV : entry + 1.5 * atrV,
-              target: long ? entry + 2.5 * atrV : entry - 2.5 * atrV,
-              reason: `全品种监控 强度${s.score}信号：${s.reasons.slice(0, 2).join('；')}`,
-              time: Math.floor(Date.now() / 1000),
-              strategy: 'watch',
-            });
-            if (res && !res.rejected) {
-              pushAlert({
-                key: `walletopen|${res.id}`,
-                title: `模拟钱包开仓：${sym.label} ${long ? '做多' : '做空'} ${lev}x`,
-                body: `保证金$500 · 入场${entry.toFixed(2)}`,
-                kind: long ? 'buy' : 'sell',
-                external: true,
-              });
-              renderWalletTab();
-              renderAiReview();
-            }
-          }
-        }
+        // 后台监控只提醒，不自动开仓；开仓统一由当前品种的强烈信号逻辑处理
       } catch (_) { /* 单品种失败不影响其他 */ }
     }
   } finally {
@@ -1495,15 +1346,7 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b === btn));
     document.querySelectorAll('.tab-page').forEach((p) => p.classList.toggle('active', p.id === btn.dataset.tab));
-    if (btn.dataset.tab === 'tabSerenity') {
-      refreshSerenity();
-      if (!$('serenityFeedBox').dataset.loaded) {
-        $('serenityFeedBox').dataset.loaded = '1';
-        refreshSerenityFeed();
-        setInterval(refreshSerenityFeed, 10 * 60 * 1000);
-      }
-    }
-    if (btn.dataset.tab === 'tabReport') { renderReports(); renderDailyReviewBox(); }
+    if (btn.dataset.tab === 'tabReport') renderReports();
     if (btn.dataset.tab === 'tabReview') renderAiReview();
     if (btn.dataset.tab === 'tabKol') refreshKolRadar();
   });
@@ -1669,11 +1512,11 @@ $('testNotify').addEventListener('click', async () => {
 
 alerts.requestPermission();
 renderArchive();
+renderSosoBox();
 loadSymbol();
 renderWalletTab();
 renderAiReview();
 renderReports();
-renderDailyReviewBox();
 
 setInterval(refreshAdvisorAndVolume, 30 * 60 * 1000);
 setInterval(refreshNews, 5 * 60 * 1000);
@@ -1681,7 +1524,8 @@ refreshKolRadar();
 setInterval(refreshKolRadar, 10 * 60 * 1000);
 setInterval(refreshGamma, 10 * 60 * 1000);
 setInterval(watchAllSymbols, 2 * 60 * 1000);
-setInterval(() => { checkDailyReview(); }, 60 * 1000);
+// 每日 23:00（UTC+8）生成基本面日报
+setInterval(checkDailyReport, 60 * 1000);
 setInterval(() => {
   settleReviews();
   renderReviewPanel();

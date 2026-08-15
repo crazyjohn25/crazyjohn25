@@ -1,9 +1,10 @@
 /**
- * 模拟交易钱包（Paper Trading，v3）
+ * 模拟交易钱包（Paper Trading，v4）
  * - 合约钱包：初始资金可在后台设置（默认$10000），单笔保证金$500-1000，杠杆10-30x（最高30倍），
  *   币安标准费率：taker 0.05%/边（开平双边计），资金费率 0.01%/8小时（按名义价值），
  *   亏损达保证金95%触发强平（损失全部保证金，含平仓费）。
  * - 支持手动平仓、注资、出金、设置初始资金。
+ * - 每笔开仓都进入不可变账本（trades），包含信号/计划/费用/平仓细节；仓位列表只是账本中 open 的子集。
  * - 每日收益复盘：只统计有真实平仓的日期（无开仓不记录）。
  * 核心风控：最多3个并存仓位、同品种同策略6小时冷却、只跟强烈信号开仓（不刷单）。
  */
@@ -37,14 +38,13 @@ export class PaperWallet {
   constructor(opts = {}) {
     this.storage =
       opts.storage || (typeof localStorage !== 'undefined' ? localStorage : memoryStore());
-    this.key = opts.key || 'kchart.paperWallet.v3';
+    this.key = opts.key || 'kchart.paperWallet.v4';
     this.maxOpen = opts.maxOpen || 3;
     this.cooldownSec = opts.cooldownSec || 6 * 3600;
     const initial = opts.initialCapital ?? 10000;
     const s = this._load();
     this.cash = s.cash ?? initial;
-    this.positions = s.positions || [];
-    this.closed = s.closed || [];
+    this.trades = s.trades || []; // 不可变账本：开仓/平仓/资金费事件
     this.equity = s.equity || [];
     this.lastEntry = s.lastEntry || {};
     this.baseCapital = s.baseCapital ?? initial;
@@ -61,14 +61,13 @@ export class PaperWallet {
   }
 
   _save() {
-    if (this.closed.length > 300) this.closed = this.closed.slice(-300);
+    if (this.trades.length > 1000) this.trades = this.trades.slice(-1000);
     if (this.equity.length > 1000) this.equity = this.equity.slice(-1000);
     this.storage.setItem(
       this.key,
       JSON.stringify({
         cash: this.cash,
-        positions: this.positions,
-        closed: this.closed,
+        trades: this.trades,
         equity: this.equity,
         lastEntry: this.lastEntry,
         baseCapital: this.baseCapital,
@@ -77,14 +76,27 @@ export class PaperWallet {
     );
   }
 
+  _newId(prefix) {
+    return `${prefix}${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  }
+
+  /** 当前持仓（账本中 open 的记录） */
+  get positions() {
+    return this.trades.filter((t) => t.status === 'open');
+  }
+
+  /** 已平仓（账本中 closed 的记录） */
+  get closed() {
+    return this.trades.filter((t) => t.status === 'closed');
+  }
+
   /** 设置初始资金（清空重来） */
   setInitialCapital(amount) {
     const amt = Number(amount);
     if (!Number.isFinite(amt) || amt < 100 || amt > 10000000) return false;
     this.cash = amt;
     this.baseCapital = amt;
-    this.positions = [];
-    this.closed = [];
+    this.trades = [];
     this.equity = [];
     this.lastEntry = {};
     this.createdAt = Math.floor(Date.now() / 1000);
@@ -114,7 +126,11 @@ export class PaperWallet {
 
   // ---------------- 合约 ----------------
 
-  openPosition({ symbol, side, price, margin, leverage, stop, target, reason, time, strategy }) {
+  /**
+   * 开仓（算法强烈信号触发）
+   * @param {Object} p { symbol, side, price, margin, leverage, stop, target, reason, time, strategy, signalId, signalScore, plan }
+   */
+  openPosition({ symbol, side, price, margin, leverage, stop, target, reason, time, strategy, signalId, signalScore, plan }) {
     margin = Math.max(MARGIN_MIN, Math.min(MARGIN_MAX, margin || MARGIN_MIN));
     leverage = Math.max(LEV_MIN, Math.min(LEV_MAX, leverage || LEV_MIN));
     const k = `${symbol}|${strategy}`;
@@ -129,18 +145,23 @@ export class PaperWallet {
     if (this.cash < margin + fee) return { rejected: '钱包余额不足' };
 
     this.cash -= margin + fee;
-    const pos = {
-      id: `p${time}_${Math.random().toString(36).slice(2, 6)}`,
+    const rec = {
+      id: this._newId('p'),
+      status: 'open',
       symbol, side, entry: price, margin, leverage, notional,
       stop: stop ?? null, target: target ?? null,
       openFee: fee, fundingPaid: 0, lastFundingTime: time,
       reason: reason || '', strategy: strategy || '-',
+      signalId: signalId || null,
+      signalScore: signalScore ?? null,
+      plan: plan || null,
       openTime: time, lastPrice: price,
+      events: [{ t: time, type: 'open', fee, note: reason }],
     };
-    this.positions.push(pos);
+    this.trades.push(rec);
     this.lastEntry[k] = time;
     this._save();
-    return pos;
+    return rec;
   }
 
   unrealized(pos, price) {
@@ -156,6 +177,7 @@ export class PaperWallet {
     const fee = pos.notional * FUNDING_RATE * periods;
     pos.fundingPaid = (pos.fundingPaid || 0) + fee;
     pos.lastFundingTime = (pos.lastFundingTime || pos.openTime) + periods * FUNDING_INTERVAL;
+    pos.events.push({ t: time, type: 'funding', fee, periods });
     return fee;
   }
 
@@ -182,25 +204,26 @@ export class PaperWallet {
   }
 
   closePosition(id, price, time, cause = 'manual') {
-    const idx = this.positions.findIndex((p) => p.id === id);
-    if (idx < 0) return null;
-    const pos = this.positions.splice(idx, 1)[0];
+    const pos = this.trades.find((t) => t.id === id && t.status === 'open');
+    if (!pos) return null;
     this._accrueFunding(pos, time);
     let pnl = this.unrealized(pos, price);
     if (cause === 'liquidated') pnl = -pos.margin;
     const closeFee = cause === 'liquidated' ? 0 : pos.notional * FEE_RATE;
     const funding = pos.fundingPaid || 0;
     this.cash += pos.margin + pnl - closeFee - funding;
-    const rec = {
-      ...pos,
-      exit: price, exitTime: time, cause,
-      pnl, closeFee, funding,
-      netPnl: pnl - closeFee - pos.openFee - funding,
-      roiPct: ((pnl - closeFee - pos.openFee - funding) / pos.margin) * 100,
-    };
-    this.closed.push(rec);
+    pos.status = 'closed';
+    pos.exit = price;
+    pos.exitTime = time;
+    pos.cause = cause;
+    pos.pnl = pnl;
+    pos.closeFee = closeFee;
+    pos.funding = funding;
+    pos.netPnl = pnl - closeFee - pos.openFee - funding;
+    pos.roiPct = ((pos.pnl - closeFee - pos.openFee - funding) / pos.margin) * 100;
+    pos.events.push({ t: time, type: 'close', cause, exit: price, pnl: pos.netPnl });
     this._save();
-    return rec;
+    return pos;
   }
 
   equitySpot(prices = {}) {

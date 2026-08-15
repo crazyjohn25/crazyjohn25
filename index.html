@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>K线智能分析终端 · 强烈信号 + 模拟盘</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="css/style.css?v=14" />
+  <link rel="stylesheet" href="css/style.css?v=15" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -37,6 +37,9 @@
           <option value="stoch">平滑STOCH</option>
           <option value="wae">WAE动能爆发</option>
           <option value="dmi">DMI</option>
+          <option value="sar">SAR</option>
+          <option value="super">SUPER</option>
+          <option value="cvd">CVD</option>
           <option value="obv">OBV</option>
         </select>
       </label>
@@ -83,7 +86,6 @@
         <button class="tab-btn" data-tab="tabReport">报告</button>
         <button class="tab-btn" data-tab="tabReview">复盘</button>
         <button class="tab-btn" data-tab="tabData">数据</button>
-        <button class="tab-btn" data-tab="tabSerenity">Serenity</button>
       </nav>
 
       <div class="tab-pages">
@@ -92,6 +94,10 @@
             <h3>策略建议 <span class="h-note">弱信号仅展示 · 强烈信号才存档开仓</span></h3>
             <div id="advisorBox" class="advisor-box"><div class="advisor-loading">分析中…</div></div>
             <button id="advisorRefresh" class="btn-small">立即重新分析</button>
+          </div>
+          <div class="panel">
+            <h3>多维策略报告 <span class="h-note">策略1：体制/位置/确认/执行 · 策略2：指标分组</span></h3>
+            <div id="strategyBox" class="review-box"><div class="advisor-loading">分析中…</div></div>
           </div>
           <div class="panel">
             <h3>建议复盘 <span class="h-note">仅强烈信号登记预测</span></h3>
@@ -161,12 +167,8 @@
 
         <div class="tab-page" id="tabReport">
           <div class="panel">
-            <h3>每日复盘 <span class="h-note">每天 10:00 / 23:00 (UTC+8)</span></h3>
-            <div id="dailyReviewBox" class="review-box"><div class="advisor-loading">到点后自动生成</div></div>
-          </div>
-          <div class="panel">
-            <h3>分析报告存档 <span class="h-note">每次建议刷新时存档</span></h3>
-            <div id="reportBox" class="review-box"><div class="advisor-loading">暂无报告</div></div>
+            <h3>每日基本面日报 <span class="h-note">每天 23:00（UTC+8）自动生成 · 多周期+Sosovalue+策略1/2</span></h3>
+            <div id="reportBox" class="review-box"><div class="advisor-loading">每天 23:00 自动生成</div></div>
           </div>
         </div>
 
@@ -196,35 +198,16 @@
             <ul id="whaleList" class="event-list"></ul>
           </div>
           <div class="panel">
+            <h3>Sosovalue 融合 <span class="h-note">清算热力图/资金费率/交易量/新闻侧</span></h3>
+            <div id="sosoBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
+          </div>
+          <div class="panel">
             <h3>每小时交易量对比 <span class="h-note">UTC+8 · 基于1小时K线</span></h3>
             <div id="volumeSummary" class="vol-summary"></div>
             <table class="vol-table" id="volumeTable">
               <thead><tr><th>时段</th><th>量</th><th>环比</th><th>vs 7日同时段</th></tr></thead>
               <tbody></tbody>
             </table>
-          </div>
-        </div>
-
-        <div class="tab-page" id="tabSerenity">
-          <div class="panel">
-            <h3>Serenity 指数 <span class="h-note">@aleabitoreddit 近30天推荐 · 等权基期100</span></h3>
-            <div id="serenityIndexBox" class="review-box"><div class="advisor-loading">加载行情中…</div></div>
-          </div>
-          <div class="panel">
-            <h3>行业子指数 <span class="h-note">激光/封装/光模块/存储等 · 30天</span></h3>
-            <div id="serenitySubBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
-          </div>
-          <div class="panel">
-            <h3>组合动态监控 <span class="h-note">重点标的近3天新闻 · 10分钟自动刷新</span></h3>
-            <div id="serenityFeedBox" class="review-box"><div class="advisor-loading">加载中…</div></div>
-          </div>
-          <div class="panel">
-            <h3>推荐组合 <span class="h-note">行业 · 叙事 · 自动评分 · 点击展开详情</span></h3>
-            <div id="serenityPicksBox" class="review-box"></div>
-          </div>
-          <div class="panel">
-            <h3>方法论深度解析</h3>
-            <div id="serenityProfileBox" class="review-box"></div>
           </div>
         </div>
       </div>
@@ -272,6 +255,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js?v=14"></script>
+  <script type="module" src="js/app.js?v=15"></script>
 </body>
 </html>
