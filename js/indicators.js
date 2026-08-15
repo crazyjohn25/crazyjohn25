@@ -1,0 +1,667 @@
+/**
+ * 技术指标计算模块（纯函数，无外部依赖）
+ * 所有函数接收K线数组 candles: [{ time, open, high, low, close, volume }]
+ * 返回与输入等长的数组，数据不足的位置为 null。
+ */
+
+/** 简单移动平均 */
+export function sma(values, period) {
+  const out = new Array(values.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < values.length; i++) {
+    sum += values[i];
+    if (i >= period) sum -= values[i - period];
+    if (i >= period - 1) out[i] = sum / period;
+  }
+  return out;
+}
+
+/** 指数移动平均（首值用前period个值的SMA做种子） */
+export function ema(values, period) {
+  const out = new Array(values.length).fill(null);
+  if (values.length < period) return out;
+  const k = 2 / (period + 1);
+  let seed = 0;
+  for (let i = 0; i < period; i++) seed += values[i];
+  let prev = seed / period;
+  out[period - 1] = prev;
+  for (let i = period; i < values.length; i++) {
+    prev = values[i] * k + prev * (1 - k);
+    out[i] = prev;
+  }
+  return out;
+}
+
+/**
+ * MACD 指标
+ * @returns {{ dif: Array, dea: Array, hist: Array }}
+ */
+export function macd(candles, fast = 12, slow = 26, signal = 9) {
+  const closes = candles.map((c) => c.close);
+  const emaFast = ema(closes, fast);
+  const emaSlow = ema(closes, slow);
+  const dif = closes.map((_, i) =>
+    emaFast[i] !== null && emaSlow[i] !== null ? emaFast[i] - emaSlow[i] : null
+  );
+
+  // 对 dif 的有效段做 EMA 得到 DEA
+  const firstValid = dif.findIndex((v) => v !== null);
+  const dea = new Array(closes.length).fill(null);
+  if (firstValid >= 0) {
+    const validDif = dif.slice(firstValid);
+    const deaValid = ema(validDif, signal);
+    for (let i = 0; i < deaValid.length; i++) {
+      dea[firstValid + i] = deaValid[i];
+    }
+  }
+
+  const hist = dif.map((v, i) =>
+    v !== null && dea[i] !== null ? v - dea[i] : null
+  );
+  return { dif, dea, hist };
+}
+
+/**
+ * 布林带 Bollinger Bands
+ * @returns {{ middle: Array, upper: Array, lower: Array }}
+ */
+export function bollinger(candles, period = 20, mult = 2) {
+  const closes = candles.map((c) => c.close);
+  const middle = sma(closes, period);
+  const upper = new Array(closes.length).fill(null);
+  const lower = new Array(closes.length).fill(null);
+  for (let i = period - 1; i < closes.length; i++) {
+    let sumSq = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const d = closes[j] - middle[i];
+      sumSq += d * d;
+    }
+    const std = Math.sqrt(sumSq / period);
+    upper[i] = middle[i] + mult * std;
+    lower[i] = middle[i] - mult * std;
+  }
+  return { middle, upper, lower };
+}
+
+/**
+ * RSI（Wilder 平滑法）
+ */
+export function rsi(candles, period = 14) {
+  const closes = candles.map((c) => c.close);
+  const out = new Array(closes.length).fill(null);
+  if (closes.length <= period) return out;
+
+  let gain = 0;
+  let loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gain += diff;
+    else loss -= diff;
+  }
+  let avgGain = gain / period;
+  let avgLoss = loss / period;
+  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return out;
+}
+
+/**
+ * KDJ 随机指标
+ * @returns {{ k: Array, d: Array, j: Array }}
+ */
+export function kdj(candles, period = 9, kSmooth = 3, dSmooth = 3) {
+  const n = candles.length;
+  const k = new Array(n).fill(null);
+  const d = new Array(n).fill(null);
+  const j = new Array(n).fill(null);
+  let prevK = 50;
+  let prevD = 50;
+
+  for (let i = 0; i < n; i++) {
+    if (i < period - 1) continue;
+    let highest = -Infinity;
+    let lowest = Infinity;
+    for (let m = i - period + 1; m <= i; m++) {
+      if (candles[m].high > highest) highest = candles[m].high;
+      if (candles[m].low < lowest) lowest = candles[m].low;
+    }
+    const range = highest - lowest;
+    const rsv = range === 0 ? 50 : ((candles[i].close - lowest) / range) * 100;
+    prevK = ((kSmooth - 1) * prevK + rsv) / kSmooth;
+    prevD = ((dSmooth - 1) * prevD + prevK) / dSmooth;
+    k[i] = prevK;
+    d[i] = prevD;
+    j[i] = 3 * prevK - 2 * prevD;
+  }
+  return { k, d, j };
+}
+
+/**
+ * DMI/ADX 动向指标（Wilder 平滑）
+ * @returns {{ pdi: Array, mdi: Array, adx: Array }}
+ */
+export function dmi(candles, period = 14) {
+  const n = candles.length;
+  const pdi = new Array(n).fill(null);
+  const mdi = new Array(n).fill(null);
+  const adx = new Array(n).fill(null);
+  if (n <= period) return { pdi, mdi, adx };
+
+  const trArr = [];
+  const pdmArr = [];
+  const mdmArr = [];
+  for (let i = 1; i < n; i++) {
+    const cur = candles[i];
+    const prev = candles[i - 1];
+    const tr = Math.max(
+      cur.high - cur.low,
+      Math.abs(cur.high - prev.close),
+      Math.abs(cur.low - prev.close)
+    );
+    const upMove = cur.high - prev.high;
+    const downMove = prev.low - cur.low;
+    trArr.push(tr);
+    pdmArr.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    mdmArr.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+
+  // Wilder 平滑
+  let trS = 0;
+  let pdmS = 0;
+  let mdmS = 0;
+  for (let i = 0; i < period; i++) {
+    trS += trArr[i];
+    pdmS += pdmArr[i];
+    mdmS += mdmArr[i];
+  }
+
+  const dxArr = new Array(n).fill(null);
+  for (let i = period; i < n; i++) {
+    if (i > period) {
+      trS = trS - trS / period + trArr[i - 1];
+      pdmS = pdmS - pdmS / period + pdmArr[i - 1];
+      mdmS = mdmS - mdmS / period + mdmArr[i - 1];
+    }
+    const p = trS === 0 ? 0 : (pdmS / trS) * 100;
+    const m = trS === 0 ? 0 : (mdmS / trS) * 100;
+    pdi[i] = p;
+    mdi[i] = m;
+    dxArr[i] = p + m === 0 ? 0 : (Math.abs(p - m) / (p + m)) * 100;
+  }
+
+  // ADX = DX 的 Wilder 平滑
+  const firstAdxIdx = period * 2 - 1;
+  if (n > firstAdxIdx) {
+    let sum = 0;
+    for (let i = period; i <= firstAdxIdx; i++) sum += dxArr[i];
+    let prevAdx = sum / period;
+    adx[firstAdxIdx] = prevAdx;
+    for (let i = firstAdxIdx + 1; i < n; i++) {
+      prevAdx = (prevAdx * (period - 1) + dxArr[i]) / period;
+      adx[i] = prevAdx;
+    }
+  }
+  return { pdi, mdi, adx };
+}
+
+/**
+ * OBV 能量潮
+ */
+export function obv(candles) {
+  const out = new Array(candles.length).fill(null);
+  if (candles.length === 0) return out;
+  let cum = 0;
+  out[0] = 0;
+  for (let i = 1; i < candles.length; i++) {
+    if (candles[i].close > candles[i - 1].close) cum += candles[i].volume;
+    else if (candles[i].close < candles[i - 1].close) cum -= candles[i].volume;
+    out[i] = cum;
+  }
+  return out;
+}
+
+/**
+ * ATR 平均真实波幅（Wilder 平滑）
+ */
+export function atr(candles, period = 14) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if (n <= period) return out;
+  const trs = [];
+  for (let i = 1; i < n; i++) {
+    const c = candles[i];
+    const p = candles[i - 1];
+    trs.push(
+      Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close))
+    );
+  }
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += trs[i];
+  let prev = sum / period;
+  out[period] = prev;
+  for (let i = period + 1; i < n; i++) {
+    prev = (prev * (period - 1) + trs[i - 1]) / period;
+    out[i] = prev;
+  }
+  return out;
+}
+
+/**
+ * VWAP 成交量加权均价（按UTC日锚定，机构常用的日内基准）
+ */
+export function vwapSeries(candles) {
+  const out = new Array(candles.length).fill(null);
+  let cumPV = 0;
+  let cumV = 0;
+  let curDay = null;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const day = Math.floor(c.time / 86400);
+    if (day !== curDay) {
+      curDay = day;
+      cumPV = 0;
+      cumV = 0;
+    }
+    const typical = (c.high + c.low + c.close) / 3;
+    cumPV += typical * c.volume;
+    cumV += c.volume;
+    out[i] = cumV > 0 ? cumPV / cumV : null;
+  }
+  return out;
+}
+
+/**
+ * 摆动高低点支撑/阻力：用 wings 根K线确认的枢轴点，
+ * 返回距当前价最近的下方支撑与上方阻力。
+ */
+export function swingLevels(candles, { lookback = 80, wings = 2 } = {}) {
+  const n = candles.length;
+  if (n < wings * 2 + 2) return { support: null, resistance: null };
+  const last = candles[n - 1].close;
+  const start = Math.max(wings, n - lookback);
+  let support = null;
+  let resistance = null;
+  for (let i = start; i < n - wings; i++) {
+    let isHigh = true;
+    let isLow = true;
+    for (let w = 1; w <= wings; w++) {
+      if (candles[i].high < candles[i - w].high || candles[i].high < candles[i + w].high)
+        isHigh = false;
+      if (candles[i].low > candles[i - w].low || candles[i].low > candles[i + w].low)
+        isLow = false;
+    }
+    if (isHigh && candles[i].high > last && (resistance === null || candles[i].high < resistance))
+      resistance = candles[i].high;
+    if (isLow && candles[i].low < last && (support === null || candles[i].low > support))
+      support = candles[i].low;
+  }
+  return { support, resistance };
+}
+
+/**
+ * CCI 顺势指标
+ */
+export function cci(candles, period = 20) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+  for (let i = period - 1; i < n; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += tp[j];
+    const ma = sum / period;
+    let dev = 0;
+    for (let j = i - period + 1; j <= i; j++) dev += Math.abs(tp[j] - ma);
+    const md = dev / period;
+    out[i] = md === 0 ? 0 : (tp[i] - ma) / (0.015 * md);
+  }
+  return out;
+}
+
+/**
+ * MFI 资金流量指标（成交量加权RSI）
+ */
+export function mfi(candles, period = 14) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if (n <= period) return out;
+  const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+  for (let i = period; i < n; i++) {
+    let pos = 0;
+    let neg = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const flow = tp[j] * candles[j].volume;
+      if (tp[j] > tp[j - 1]) pos += flow;
+      else if (tp[j] < tp[j - 1]) neg += flow;
+    }
+    out[i] = neg === 0 ? 100 : 100 - 100 / (1 + pos / neg);
+  }
+  return out;
+}
+
+/**
+ * Williams %R 威廉指标（-100~0）
+ */
+export function willr(candles, period = 14) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    let hh = -Infinity;
+    let ll = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (candles[j].high > hh) hh = candles[j].high;
+      if (candles[j].low < ll) ll = candles[j].low;
+    }
+    const range = hh - ll;
+    out[i] = range === 0 ? -50 : ((hh - candles[i].close) / range) * -100;
+  }
+  return out;
+}
+
+/**
+ * ZigZag 摆动点（截图中的swing标价）：反转幅度超过 atrMult×ATR 才确认新枢轴
+ * @returns {Array<{index, time, price, type:'high'|'low'}>}
+ */
+export function zigzag(candles, { atrMult = 2.5, atrPeriod = 14 } = {}) {
+  const n = candles.length;
+  if (n < atrPeriod + 3) return [];
+  const atrArr = atr(candles, atrPeriod);
+  const pivots = [];
+  let dir = 0; // 1寻顶 -1寻底
+  let extIdx = 0;
+  let extPrice = candles[0].close;
+
+  for (let i = 1; i < n; i++) {
+    const th = (atrArr[i] ?? atrArr[atrPeriod] ?? 0) * atrMult;
+    const c = candles[i];
+    if (dir >= 0 && c.high > extPrice) {
+      extPrice = c.high;
+      extIdx = i;
+      dir = 1;
+    } else if (dir <= 0 && c.low < extPrice) {
+      extPrice = c.low;
+      extIdx = i;
+      dir = -1;
+    }
+    if (dir === 1 && th > 0 && extPrice - c.low >= th) {
+      pivots.push({ index: extIdx, time: candles[extIdx].time, price: extPrice, type: 'high' });
+      dir = -1;
+      extPrice = c.low;
+      extIdx = i;
+    } else if (dir === -1 && th > 0 && c.high - extPrice >= th) {
+      pivots.push({ index: extIdx, time: candles[extIdx].time, price: extPrice, type: 'low' });
+      dir = 1;
+      extPrice = c.high;
+      extIdx = i;
+    }
+  }
+  return pivots;
+}
+
+/**
+ * 平滑随机指标（截图中间副图：圆弧形K/D，超买超卖区停留）
+ * rawK(period) -> SMA(kSmooth) -> K；K -> SMA(dSmooth) -> D
+ */
+export function stochSmooth(candles, period = 14, kSmooth = 6, dSmooth = 6) {
+  const n = candles.length;
+  const raw = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    let hh = -Infinity;
+    let ll = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (candles[j].high > hh) hh = candles[j].high;
+      if (candles[j].low < ll) ll = candles[j].low;
+    }
+    const range = hh - ll;
+    raw[i] = range === 0 ? 50 : ((candles[i].close - ll) / range) * 100;
+  }
+  const smaOf = (arr, p) => {
+    const out = new Array(n).fill(null);
+    let sum = 0;
+    let cnt = 0;
+    for (let i = 0; i < n; i++) {
+      if (arr[i] === null) continue;
+      sum += arr[i];
+      cnt++;
+      if (cnt > p) {
+        // 找到p个之前的那个值减去
+        let k = i - 1;
+        let seen = 0;
+        for (; k >= 0; k--) {
+          if (arr[k] !== null) seen++;
+          if (seen === p) break;
+        }
+        sum -= arr[k];
+        cnt = p;
+      }
+      if (cnt === p) out[i] = sum / p;
+    }
+    return out;
+  };
+  const k = smaOf(raw, kSmooth);
+  const d = smaOf(k, dSmooth);
+  return { k, d };
+}
+
+/**
+ * 动能爆发 WAE（截图底部副图，Waddah Attar Explosion风格）：
+ * momentum = (MACD快线差分)×sensitivity（正绿负红），explosion = 布林带宽度阈值线，
+ * |momentum| > explosion 视为有效动能爆发。
+ */
+export function wae(candles, { fast = 20, slow = 40, sensitivity = 150, bbPeriod = 20, bbMult = 2 } = {}) {
+  const closes = candles.map((c) => c.close);
+  const emaFast = ema(closes, fast);
+  const emaSlow = ema(closes, slow);
+  const macdLine = closes.map((_, i) =>
+    emaFast[i] !== null && emaSlow[i] !== null ? emaFast[i] - emaSlow[i] : null
+  );
+  const n = candles.length;
+  const momentum = new Array(n).fill(null);
+  for (let i = 1; i < n; i++) {
+    if (macdLine[i] !== null && macdLine[i - 1] !== null) {
+      momentum[i] = (macdLine[i] - macdLine[i - 1]) * sensitivity;
+    }
+  }
+  const { upper, lower } = bollinger(candles, bbPeriod, bbMult);
+  const explosion = upper.map((u, i) => (u !== null && lower[i] !== null ? u - lower[i] : null));
+  return { momentum, explosion };
+}
+
+/**
+ * 抛物线SAR（抛物转向指标）
+ */
+export function parabolicSar(candles, { step = 0.02, max = 0.2 } = {}) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if (n < 2) return out;
+  let rising = candles[1].close >= candles[0].close;
+  let ep = rising ? candles[0].high : candles[0].low;
+  let af = step;
+  out[0] = rising ? candles[0].low : candles[0].high;
+  for (let i = 1; i < n; i++) {
+    const prev = out[i - 1];
+    let sar = prev + af * (ep - prev);
+    const c = candles[i];
+    if (rising) {
+      sar = Math.min(sar, candles[i - 1].low, i > 1 ? candles[i - 2].low : sar);
+      if (c.low < sar) {
+        rising = false;
+        sar = ep;
+        ep = c.low;
+        af = step;
+      } else {
+        if (c.high > ep) {
+          ep = c.high;
+          af = Math.min(af + step, max);
+        }
+      }
+    } else {
+      sar = Math.max(sar, candles[i - 1].high, i > 1 ? candles[i - 2].high : sar);
+      if (c.high > sar) {
+        rising = true;
+        sar = ep;
+        ep = c.high;
+        af = step;
+      } else {
+        if (c.low < ep) {
+          ep = c.low;
+          af = Math.min(af + step, max);
+        }
+      }
+    }
+    out[i] = sar;
+  }
+  return out;
+}
+
+/**
+ * 超级趋势 SuperTrend
+ */
+export function superTrend(candles, { period = 10, multiplier = 3 } = {}) {
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  const dir = new Array(n).fill(null);
+  if (n <= period) return { line: out, direction: dir };
+  const atrArr = atr(candles, period);
+  let upper = null;
+  let lower = null;
+  let trend = 1;
+  for (let i = period; i < n; i++) {
+    const c = candles[i];
+    const hl2 = (c.high + c.low) / 2;
+    const a = atrArr[i];
+    if (a === null) continue;
+    const basicUpper = hl2 + multiplier * a;
+    const basicLower = hl2 - multiplier * a;
+    upper = upper === null ? basicUpper : (basicUpper < upper || candles[i - 1].close > upper ? basicUpper : upper);
+    lower = lower === null ? basicLower : (basicLower > lower || candles[i - 1].close < lower ? basicLower : lower);
+    if (trend === 1) {
+      if (c.close < lower) trend = -1;
+    } else {
+      if (c.close > upper) trend = 1;
+    }
+    out[i] = trend === 1 ? lower : upper;
+    dir[i] = trend;
+  }
+  return { line: out, direction: dir };
+}
+
+/** 累计成交量差（CVD）：收盘价涨记+量，跌记-量 */
+export function cvdSeries(candles) {
+  const out = new Array(candles.length).fill(null);
+  let cum = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    if (i === 0) out[i] = 0;
+    else if (c.close > candles[i - 1].close) cum += c.volume;
+    else if (c.close < candles[i - 1].close) cum -= c.volume;
+    out[i] = cum;
+  }
+  return out;
+}
+
+/**
+ * Volume Profile 成交量分布
+ */
+export function volumeProfile(candles, { bins = 24, lookback = 120 } = {}) {
+  const n = candles.length;
+  if (n === 0) return null;
+  const start = Math.max(0, n - lookback);
+  const slice = candles.slice(start);
+  let min = Infinity;
+  let max = -Infinity;
+  for (const c of slice) {
+    if (c.low < min) min = c.low;
+    if (c.high > max) max = c.high;
+  }
+  if (max <= min) return null;
+  const step = (max - min) / bins;
+  const rows = Array.from({ length: bins }, (_, i) => ({ price: min + step * (i + 0.5), low: min + step * i, high: min + step * (i + 1), volume: 0 }));
+  for (const c of slice) {
+    const tp = (c.high + c.low + c.close) / 3;
+    const idx = Math.min(bins - 1, Math.max(0, Math.floor((tp - min) / step)));
+    rows[idx].volume += c.volume;
+  }
+  const poc = rows.reduce((a, b) => (b.volume > a.volume ? b : a), rows[0]);
+  const total = rows.reduce((s, r) => s + r.volume, 0);
+  let acc = 0;
+  let vaLow = min;
+  let vaHigh = max;
+  for (const r of rows) {
+    acc += r.volume;
+    if (acc >= total * 0.3) { vaLow = r.low; }
+    if (acc >= total * 0.7) { vaHigh = r.high; break; }
+  }
+  const last = candles[n - 1].close;
+  const above = rows.filter((r) => r.price > last).sort((a, b) => b.volume - a.volume)[0] || null;
+  const below = rows.filter((r) => r.price < last).sort((a, b) => b.volume - a.volume)[0] || null;
+  return { poc: poc.price, vaLow, vaHigh, hvnAbove: above ? above.price : null, hvnBelow: below ? below.price : null, nodes: rows };
+}
+
+/**
+ * 清算簇估计（基于K线范围 + Sosovalue类清算热力图结构）
+ * 在 lookback 内取价格分箱，按簇强度排序。
+ */
+export function liquidationClusters(candles, { bins = 18, lookback = 96 } = {}) {
+  const n = candles.length;
+  if (n === 0) return [];
+  const start = Math.max(0, n - lookback);
+  const slice = candles.slice(start);
+  let min = Infinity;
+  let max = -Infinity;
+  for (const c of slice) {
+    if (c.low < min) min = c.low;
+    if (c.high > max) max = c.high;
+  }
+  if (max <= min) return [];
+  const step = (max - min) / bins;
+  const binsArr = Array.from({ length: bins }, (_, i) => ({ price: min + step * (i + 0.5), low: min + step * i, high: min + step * (i + 1), intensity: 0 }));
+  for (const c of slice) {
+    const range = c.high - c.low;
+    const mid = (c.high + c.low + c.close) / 3;
+    const idx = Math.min(bins - 1, Math.max(0, Math.floor((mid - min) / step)));
+    binsArr[idx].intensity += range * (1 + Math.abs(c.close - c.open) / (range || 1)) * Math.log10(c.volume + 1);
+  }
+  return binsArr
+    .filter((b) => b.intensity > 0)
+    .sort((a, b) => b.intensity - a.intensity)
+    .slice(0, 6)
+    .map((b) => ({ price: b.price, intensity: +b.intensity.toFixed(2) }));
+}
+
+/** 一次性计算全部指标，供图表与信号引擎复用 */
+export function computeAll(candles, params = {}) {
+  const closes = candles.map((c) => c.close);
+  return {
+    macd: macd(candles, params.macdFast, params.macdSlow, params.macdSignal),
+    boll: bollinger(candles, params.bollPeriod, params.bollMult),
+    rsi: rsi(candles, params.rsiPeriod),
+    kdj: kdj(candles, params.kdjPeriod),
+    dmi: dmi(candles, params.dmiPeriod),
+    obv: obv(candles),
+    atr: atr(candles, params.atrPeriod),
+    vwap: vwapSeries(candles),
+    ema20: ema(closes, 20),
+    ema50: ema(closes, 50),
+    ema200: ema(closes, 200),
+    cci: cci(candles, params.cciPeriod),
+    mfi: mfi(candles, params.mfiPeriod),
+    willr: willr(candles, params.willrPeriod),
+    ema10: ema(closes, 10),
+    ema30: ema(closes, 30),
+    ema60: ema(closes, 60),
+    stoch: stochSmooth(candles),
+    wae: wae(candles),
+    swings: zigzag(candles),
+    sar: parabolicSar(candles),
+    super: superTrend(candles),
+    cvd: cvdSeries(candles),
+    vp: volumeProfile(candles),
+    liquidation: liquidationClusters(candles),
+  };
+}

@@ -1,0 +1,11 @@
+{
+  "name": "kline-macro-signals",
+  "version": "1.0.0",
+  "description": "K线智能分析终端：宏观事件标注 + 多指标买卖信号与报警",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "python3 -m http.server 8080"
+  },
+  "license": "MIT"
+}
