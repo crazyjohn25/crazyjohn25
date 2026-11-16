@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -147,6 +149,24 @@ class ParserTests(unittest.TestCase):
         december = rows[0]["t"]
         january = rows[1]["t"]
         self.assertLess(december, january)
+
+
+class BindTests(unittest.TestCase):
+    def test_health_answers_on_ipv4_and_ipv6(self):
+        from server import DualStackServer, Handler
+
+        httpd = DualStackServer(("::", 0), Handler)
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for url in (f"http://127.0.0.1:{port}/api/health", f"http://[::1]:{port}/api/health"):
+                with urllib.request.urlopen(url, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(b"ok", response.read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 if __name__ == "__main__":

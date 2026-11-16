@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,8 +14,21 @@ from engine.universe import BY_ID
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
-HOST = "0.0.0.0"
 PORT = 8765
+
+
+class DualStackServer(ThreadingHTTPServer):
+    """One socket for ::1 and 127.0.0.1. IPv4-only left localhost on ::1 refused."""
+
+    address_family = socket.AF_INET6
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+        host, port, *_rest = self.server_address
+        self.server_address = (host, port)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -90,8 +104,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"核对台 http://127.0.0.1:{PORT}")
+    try:
+        server = DualStackServer(("::", PORT), Handler)
+    except OSError as exc:
+        print(f"IPv6 双栈不可用（{exc}），只监听 IPv4")
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        server.allow_reuse_address = True
+    print(f"核对台 http://127.0.0.1:{PORT}  http://[::1]:{PORT}")
     server.serve_forever()
 
 
