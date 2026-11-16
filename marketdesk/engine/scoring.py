@@ -107,7 +107,7 @@ def _divergence(price, indicator, kind: str, end: int) -> bool:
 
 
 def _higher_direction(higher_bars: list[dict], name: str) -> tuple[float | None, str]:
-    if higher_bars is None or len(higher_bars) < 25:
+    if higher_bars is None or len(higher_bars) < 20:
         return None, f"{name}样本不足，这项不投票"
     pack = compute(higher_bars)
     i = len(higher_bars) - 1
@@ -659,6 +659,112 @@ def invalidation(bars, pack, index: int, action: float) -> dict:
     }
 
 
+def _build_playbook(bars, pack, index: int, regime: str, direction: float, exec_score: float, action: float, risk_score: float, inv: dict, events: dict, positives: list, negatives: list, adjustments: list) -> dict:
+    close = bars[index]["c"]
+    atr_v = _at(pack["atr"], index) or close * 0.02
+    ema20 = _at(pack["ema20"], index) or close
+    bb_up = _at(pack["bb_up"], index) or (close + 2 * atr_v)
+    bb_low = _at(pack["bb_low"], index) or (close - 2 * atr_v)
+    recent = bars[max(0, index - 20) : index + 1]
+    swing_high = max(b["h"] for b in recent)
+    swing_low = min(b["l"] for b in recent)
+    stretch = abs(close - ema20) / atr_v if atr_v else 0.0
+
+    if direction >= 18:
+        bias = "long"
+        zone_title = "支撑低吸参考区" if regime == "range" else "顺势回踩介入区"
+        if regime == "range":
+            zone_low = min(bb_low, swing_low)
+            zone_high = zone_low + 0.45 * atr_v
+        else:
+            anchor = max(inv["level"] + 0.15 * atr_v, ema20 - 0.35 * atr_v)
+            zone_low = min(close, anchor)
+            zone_high = min(close * 1.003, max(anchor + 0.45 * atr_v, ema20 + 0.2 * atr_v))
+        target1 = max(close + 1.4 * atr_v, swing_high, bb_up)
+        target2 = max(target1 + 1.2 * atr_v, close + 2.8 * atr_v)
+    elif direction <= -18:
+        bias = "short"
+        zone_title = "反弹减仓 / 压力观察区"
+        cap = inv["level"] - 0.15 * atr_v
+        anchor = min(cap, ema20 + 0.3 * atr_v)
+        zone_low = max(close * 0.997, min(ema20 - 0.25 * atr_v, anchor - 0.4 * atr_v))
+        zone_high = max(zone_low + 0.25 * atr_v, anchor)
+        target1 = min(close - 1.4 * atr_v, swing_low, bb_low)
+        target2 = min(target1 - 1.2 * atr_v, close - 2.8 * atr_v)
+    else:
+        bias = "neutral"
+        zone_title = "震荡区间下沿支撑 / 上沿阻力"
+        zone_low = min(bb_low, swing_low)
+        zone_high = max(bb_up, swing_high)
+        target1 = zone_high
+        target2 = min(bb_low, swing_low)
+
+    risk_dist = max(abs(close - inv["level"]), 0.85 * atr_v)
+    rr_now = round(min(6.0, abs(target1 - close) / risk_dist), 2)
+    entry_mid = (zone_low + zone_high) / 2.0
+    rr_pullback = round(min(6.0, abs(target1 - entry_mid) / max(abs(entry_mid - inv["level"]), 0.85 * atr_v)), 2)
+
+    if events["earnings_window"]:
+        verdict_title, verdict_tone = "财报跳空高危窗口 · 严控仓位观望", "flat"
+        spot_action = "距离财报极近，盘前盘后易现跳空缺口。忠实建议：不要在财报前重仓赌方向，浮盈仓位可适当锁利。"
+        swing_action = "暂停新建高倍杠杆或短线追单，等待财报落地确认方向后再顺势跟随。"
+        position_cap = "10%–15% 以内（财报避险上限）"
+    elif events["in_window"]:
+        verdict_title, verdict_tone = "重大宏观数据窗口 · 降仓避险", "flat"
+        spot_action = "未来 48 小时内有美联储利率决议 / CPI / 非农等核心宏观数据，建议暂停追单，保留现金等待落地。"
+        swing_action = "主动收缩杠杆敞口，避免数据公布前重仓扛单。"
+        position_cap = "15%–20% 以内（宏观窗口上限）"
+    elif action >= 55:
+        verdict_title, verdict_tone = "多头强力共振 · 顺势偏多布局", "up"
+        spot_action = f"趋势、动量与量能多头同向（综合总分 +{action:.0f}），可分批建仓或顺势持仓，收盘不破 {_fmt(inv['level'])} 持有。"
+        swing_action = f"回踩 {_fmt(zone_low)}–{_fmt(zone_high)} 可顺势做多，破 {_fmt(inv['level'])} 止损。"
+        position_cap = "35%–45%" if risk_score >= 68 else "50%–65%（标准顺势仓）"
+    elif action >= 25:
+        verdict_title, verdict_tone = "温和偏多 · 逢低分批，切勿追高", "up"
+        spot_action = f"大方向看涨（方向分 +{direction:.0f}），宜在 {_fmt(zone_low)}–{_fmt(zone_high)} 分批低吸，勿急拉满仓。"
+        swing_action = f"等回踩支撑企稳介入，破 {_fmt(inv['level'])} 止损。"
+        position_cap = "25%–40%（分 2 批介入）"
+    elif action <= -55:
+        verdict_title, verdict_tone = "空头趋势确立 · 严格规避抄底", "down"
+        spot_action = f"核心指标共振看跌（综合总分 {action:.0f}），严禁左侧抄底接飞刀，持仓逢反抽减仓。"
+        swing_action = f"反抽 {_fmt(zone_low)}–{_fmt(zone_high)} 受阻偏空，收盘站上 {_fmt(inv['level'])} 止损。"
+        position_cap = "现货 0%–10% 防守；空单上限 30%–40%"
+    elif action <= -25:
+        verdict_title, verdict_tone = "偏空承压 · 减仓防守，不急抄底", "down"
+        spot_action = f"空头力量占优（综合总分 {action:.0f}），建议反弹减仓防守，等待收复 {_fmt(inv['level'])} 后再看多。"
+        swing_action = f"勿在急跌地板价追空，观察反抽 {_fmt(zone_low)}–{_fmt(zone_high)} 承压情况。"
+        position_cap = "现货防守观望；波段轻仓 15%–25%"
+    else:
+        verdict_title, verdict_tone = "多空分歧拉锯 · 现金观望最有利", "flat"
+        spot_action = f"多空指标抵消或短线偏离均线过大（综合总分 {action:+.0f}），不交易即是最佳仓位保护。"
+        swing_action = f"关注 {_fmt(zone_low)}–{_fmt(zone_high)} 关键区间，突破确认前不重仓单边。"
+        position_cap = "0%–15%（保留现金耐心等待）"
+
+    pct = ((inv["level"] - close) / close * 100.0) if close else None
+    return {
+        "bias": bias,
+        "verdict_title": verdict_title,
+        "verdict_tone": verdict_tone,
+        "spot_action": spot_action,
+        "swing_action": swing_action,
+        "position_cap": position_cap,
+        "zone_title": zone_title,
+        "entry_low": round(zone_low, 4),
+        "entry_high": round(zone_high, 4),
+        "stop_level": round(inv["level"], 4),
+        "stop_pct": None if pct is None else round(pct, 2),
+        "target_1": round(target1, 4),
+        "target_2": round(target2, 4),
+        "rr_now": rr_now,
+        "rr_pullback": rr_pullback,
+        "swing_high_20": round(swing_high, 4),
+        "swing_low_20": round(swing_low, 4),
+        "stretch_atr": round(stretch, 2),
+        "bull_points": [{"name": s["name"], "points": round(s["points"], 1), "text": s["reading"]} for s in positives[:4]],
+        "bear_points": [{"name": s["name"], "points": round(s["points"], 1), "text": s["reading"]} for s in negatives[:3]],
+    }
+
+
 def evaluate(bars: list[dict], higher_bars: list[dict] | None, context: dict) -> dict:
     if len(bars) < 80:
         return {
@@ -842,6 +948,9 @@ def evaluate(bars: list[dict], higher_bars: list[dict] | None, context: dict) ->
         "aroon_up": _at(pack["aroon_up"], i),
         "aroon_down": _at(pack["aroon_down"], i),
     }
+    playbook = _build_playbook(
+        bars, pack, i, regime, direction, exec_score, action, risk, level, events, positives, negatives, adjustments
+    )
     return {
         "ok": True,
         "regime": regime,
@@ -856,6 +965,7 @@ def evaluate(bars: list[dict], higher_bars: list[dict] | None, context: dict) ->
         "tvmc": round(tvmc_value, 1),
         "coverage": round(coverage, 2),
         "summary": "".join(bits),
+        "playbook": playbook,
         "signals": signals,
         "adjustments": adjustments,
         "invalidation": level,

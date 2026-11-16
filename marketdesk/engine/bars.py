@@ -47,6 +47,15 @@ def to_weekly(daily_bars: list[dict]) -> list[dict]:
     return resample(daily_bars, iso_week)
 
 
+def to_equity_4h(hourly_bars: list[dict]) -> list[dict]:
+    def bucket(ts: int) -> tuple[int, int, int, int]:
+        dt = datetime.fromtimestamp(ts, NY)
+        half = 0 if dt.hour < 13 else 1
+        return dt.year, dt.month, dt.day, half
+
+    return resample(hourly_bars, bucket)
+
+
 def bar_is_closed(bar: dict, interval_sec: int, asset_class: str, now: float) -> bool:
     """A bar is closed only after its session (or its clock bucket) has ended."""
     if interval_sec >= 86400 * 5:
@@ -55,6 +64,11 @@ def bar_is_closed(bar: dict, interval_sec: int, asset_class: str, now: float) ->
     if asset_class != "crypto" and interval_sec >= 86400:
         start = datetime.fromtimestamp(bar["t"], NY)
         close = start.replace(hour=16, minute=0, second=0, microsecond=0)
+        return now >= close.timestamp()
+    if asset_class != "crypto" and interval_sec == 14400:
+        start = datetime.fromtimestamp(bar["t"], NY)
+        end_hour = 13 if start.hour < 13 else 16
+        close = start.replace(hour=end_hour, minute=0, second=0, microsecond=0)
         return now >= close.timestamp()
     return bar["t"] + interval_sec <= now + 1
 

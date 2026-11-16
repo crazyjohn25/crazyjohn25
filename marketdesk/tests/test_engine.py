@@ -10,9 +10,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engine.datasources import parse_bls_release_table, parse_farside, parse_fomc
+from engine.datasources import merge_bars_by_time, parse_bitbo_flows, parse_bls_release_table, parse_farside, parse_fomc
 from engine.indicators import bollinger, compute, ema, sma
 from engine.scoring import _divergence, evaluate
+from engine.universe import BY_ID, normalize_horizon
 
 
 def bars_from_closes(closes, volume=1_000):
@@ -81,6 +82,22 @@ class ScoringTests(unittest.TestCase):
         self.assertGreater(result["direction_score"], 35)
         self.assertGreater(result["action_score"], 15)
         self.assertIn(result["stance"], {"trend_long", "trend_long_light"})
+        self.assertIn("playbook", result)
+        self.assertIsNotNone(result["playbook"]["stop_level"])
+
+    def test_spacex_is_listed_spcx_and_horizons_normalize(self):
+        self.assertEqual(BY_ID["spacex"]["symbol"], "SPCX")
+        self.assertTrue(BY_ID["spacex"]["tradable"])
+        self.assertEqual(normalize_horizon("swing"), "1d")
+        self.assertEqual(normalize_horizon("4h"), "4h")
+        self.assertIsNone(normalize_horizon("invalid"))
+
+    def test_bitbo_and_merge_bars(self):
+        rows = parse_bitbo_flows("<table><tr><td>Nov 10, 2026</td><td>-302.0</td><td>-32.2</td><td>-334.9</td></tr></table>")
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["total_musd"], -334.9)
+        merged = merge_bars_by_time([{"t": 1, "c": 10}, {"t": 2, "c": 11}], [{"t": 2, "c": 12}, {"t": 3, "c": 13}])
+        self.assertEqual([b["c"] for b in merged], [10, 12, 13])
 
     def test_event_window_caps_execution(self):
         rows = uptrend()

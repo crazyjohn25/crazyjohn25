@@ -8,13 +8,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
-UA = {"User-Agent": "MarketDesk/1.0 (research; +https://localhost)"}
+UA = "MarketDesk/1.0 (research; +https://localhost)"
+BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -28,18 +30,97 @@ class DataError(RuntimeError):
     pass
 
 
-def _get(url: str, timeout: float = 12, accept: str = "*/*") -> bytes:
-    req = urllib.request.Request(url, headers={**UA, "Accept": accept, "Accept-Language": "en-US,en;q=0.9"})
+def _get(url: str, timeout: float = 5.5, accept: str = "*/*", user_agent: str = UA) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": user_agent, "Accept": accept, "Accept-Language": "en-US,en;q=0.9"},
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = response.read(2_500_000)
-            if len(data) >= 2_500_000:
+            data = response.read(3_500_000)
+            if len(data) >= 3_500_000:
                 raise DataError("上游响应过大")
             return data
     except urllib.error.HTTPError as exc:
         raise DataError(f"上游返回 {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise DataError("上游暂时不可达") from exc
+
+
+def binance_bars(symbol: str, interval: str, limit: int = 400) -> list[dict]:
+    query = urllib.parse.urlencode(
+        {"symbol": symbol, "interval": interval, "limit": min(1000, max(20, int(limit)))}
+    )
+    payload = json.loads(
+        _get(
+            f"https://data-api.binance.vision/api/v3/klines?{query}",
+            timeout=5.0,
+            accept="application/json",
+            user_agent=BROWSER_UA,
+        )
+    )
+    if not isinstance(payload, list) or len(payload) < 5:
+        raise DataError("Binance K 线为空")
+    return [
+        {
+            "t": int(row[0]) // 1000,
+            "o": float(row[1]),
+            "h": float(row[2]),
+            "l": float(row[3]),
+            "c": float(row[4]),
+            "v": float(row[5]),
+        }
+        for row in payload
+    ]
+
+
+def hyperliquid_bars(coin: str, interval: str, lookback_days: int = 730) -> list[dict]:
+    now_ms = int(time.time() * 1000)
+    body = json.dumps(
+        {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": coin,
+                "interval": interval,
+                "startTime": now_ms - lookback_days * 86_400_000,
+                "endTime": now_ms,
+            },
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.hyperliquid.xyz/info",
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": BROWSER_UA},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            rows = json.loads(response.read(3_500_000))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise DataError("Hyperliquid 暂时不可达") from exc
+    if not isinstance(rows, list) or len(rows) < 5:
+        raise DataError("Hyperliquid K 线为空")
+    return [
+        {
+            "t": int(row["t"]) // 1000,
+            "o": float(row["o"]),
+            "h": float(row["h"]),
+            "l": float(row["l"]),
+            "c": float(row["c"]),
+            "v": float(row["v"]),
+        }
+        for row in rows
+    ]
+
+
+def merge_bars_by_time(older_bars: list[dict] | None, newer_bars: list[dict] | None) -> list[dict]:
+    if not older_bars:
+        return list(newer_bars or [])
+    if not newer_bars:
+        return list(older_bars)
+    cutoff = newer_bars[0]["t"]
+    prefix = [bar for bar in older_bars if bar["t"] < cutoff]
+    return prefix + list(newer_bars)
 
 
 def _rows_from_yahoo(payload: dict) -> list[dict]:
@@ -68,58 +149,36 @@ def yahoo_bars(symbol: str, interval: str, range_: str) -> list[dict]:
         {"interval": interval, "range": range_, "includePrePost": "false", "events": "div|split"}
     )
     encoded = urllib.parse.quote(symbol, safe="")
-    payload = json.loads(_get(f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?{query}"))
+    payload = json.loads(_get(f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?{query}", timeout=5.0))
     return _rows_from_yahoo(payload)
 
 
-def yahoo_private_mark(symbol: str) -> dict:
-    encoded = urllib.parse.quote(symbol, safe="")
-    payload = json.loads(
-        _get(f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval=1d&range=1y&includePrePost=false")
-    )
-    result = (payload.get("chart") or {}).get("result") or []
-    if not result:
-        raise DataError("没有私人公司参考价")
-    meta = result[0].get("meta") or {}
-    price = meta.get("regularMarketPrice")
-    if price is None:
-        raise DataError("没有私人公司参考价")
-    ts = meta.get("regularMarketTime") or int(time.time())
-    return {
-        "price": float(price),
-        "t": int(ts),
-        "name": meta.get("longName") or meta.get("shortName") or symbol,
-        "currency": meta.get("currency") or "USD",
-    }
-
-
 def kraken_bars(pair: str, interval: int) -> list[dict]:
-    payload = json.loads(_get(f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={int(interval)}"))
+    payload = json.loads(_get(f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={int(interval)}", timeout=5.0))
     if payload.get("error"):
         raise DataError("Kraken 拒绝了这个交易对")
     result = payload.get("result") or {}
     key = next((k for k in result if k != "last"), None)
     if not key:
         raise DataError("Kraken 没有返回 K 线")
-    bars = []
-    for row in result[key]:
-        bars.append(
-            {
-                "t": int(row[0]),
-                "o": float(row[1]),
-                "h": float(row[2]),
-                "l": float(row[3]),
-                "c": float(row[4]),
-                "v": float(row[6]),
-            }
-        )
+    bars = [
+        {
+            "t": int(row[0]),
+            "o": float(row[1]),
+            "h": float(row[2]),
+            "l": float(row[3]),
+            "c": float(row[4]),
+            "v": float(row[6]),
+        }
+        for row in result[key]
+    ]
     if len(bars) < 10:
         raise DataError("Kraken K 线太短")
     return bars
 
 
 def funding_rate(inst_id: str) -> float | None:
-    payload = json.loads(_get(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}"))
+    payload = json.loads(_get(f"https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}", timeout=4.0))
     data = payload.get("data") or []
     if not data:
         return None
@@ -144,7 +203,7 @@ def google_news(query: str, edition: str = "zh") -> list[dict]:
     else:
         params = {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
     url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
-    root_bytes = _get(url, accept="application/rss+xml, application/xml, text/xml")
+    root_bytes = _get(url, timeout=3.5, accept="application/rss+xml, application/xml, text/xml")
     import xml.etree.ElementTree as ET
 
     try:
@@ -153,7 +212,7 @@ def google_news(query: str, edition: str = "zh") -> list[dict]:
         raise DataError("新闻源格式异常") from exc
     items = []
     for node in root.findall(".//item"):
-        title = unescape((node.findtext("title") or "")).strip()
+        title = unescape((node.findtext("title") or "")).strip()[:300]
         link = (node.findtext("link") or "").strip()
         if not title or not link.startswith("https://"):
             continue
@@ -171,13 +230,15 @@ def google_news(query: str, edition: str = "zh") -> list[dict]:
     return items
 
 
-def collect_news(queries: list[str], limit: int = 16) -> tuple[list[dict], list[str]]:
+def collect_news(queries: list[str], limit: int = 14) -> tuple[list[dict], list[str]]:
     found = []
     errors = []
-    for query in queries:
-        for edition in ("zh", "en"):
+    tasks = [(query, edition) for query in queries[:3] for edition in ("zh", "en")]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(google_news, q, ed) for q, ed in tasks]
+        for fut in futures:
             try:
-                found.extend(google_news(query, edition))
+                found.extend(fut.result())
             except DataError as exc:
                 errors.append(str(exc))
     dedup = []
@@ -188,6 +249,7 @@ def collect_news(queries: list[str], limit: int = 16) -> tuple[list[dict], list[
             continue
         seen.add(key)
         dedup.append(item)
+
     def rank(item: dict) -> tuple:
         title = item["title"].casefold()
         penalty = 1 if any(word in title for word in ("deadline", "law firm", "investor alert", "shareholder alert")) else 0
@@ -222,16 +284,7 @@ def parse_bls_release_table(html: str, kind: str, title: str) -> list[dict]:
         stamp = _bls_stamp(texts[1])
         if stamp is None:
             continue
-        events.append(
-            {
-                "t": stamp,
-                "kind": kind,
-                "impact": "high",
-                "title": title,
-                "scope": "macro",
-                "source": "bls.gov",
-            }
-        )
+        events.append({"t": stamp, "kind": kind, "impact": "high", "title": title, "scope": "macro", "source": "bls.gov"})
     return events
 
 
@@ -289,16 +342,61 @@ def parse_fomc(html: str) -> list[dict]:
     return events
 
 
+def parse_bitbo_flows(html: str) -> list[dict]:
+    rows = []
+    for row in re.findall(r"<tr[\s\S]*?</tr>", html, flags=re.I):
+        cells = re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row, flags=re.I)
+        texts = [re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", c)).replace("\xa0", " ")).strip() for c in cells]
+        if len(texts) < 3:
+            continue
+        match = re.match(r"^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})$", texts[0])
+        if not match:
+            continue
+        month = MONTHS.get(match.group(1).lower())
+        if not month:
+            continue
+        numbers = []
+        for cell in texts[1:]:
+            if cell in {"", "-", "—"}:
+                continue
+            negative = cell.startswith("(") or cell.startswith("-")
+            cleaned = cell.replace("(", "").replace(")", "").replace(",", "").replace("+", "").replace("$", "")
+            try:
+                value = float(cleaned)
+            except ValueError:
+                continue
+            numbers.append(-abs(value) if negative else value)
+        if not numbers:
+            continue
+        try:
+            dt = datetime(int(match.group(3)), month, int(match.group(2)), 21, 0, tzinfo=NY)
+        except ValueError:
+            continue
+        rows.append(
+            {
+                "t": int(dt.timestamp()),
+                "ibit_musd": numbers[0] if len(numbers) >= 2 else None,
+                "fbtc_musd": numbers[1] if len(numbers) >= 3 else None,
+                "total_musd": numbers[-1],
+            }
+        )
+    rows.sort(key=lambda item: item["t"])
+    dedup, seen = [], set()
+    for row in rows:
+        if row["t"] not in seen:
+            seen.add(row["t"])
+            dedup.append(row)
+    return dedup
+
+
 def parse_farside(html: str) -> list[dict]:
     rows = []
     for row in re.findall(r"<tr[\s\S]*?</tr>", html, flags=re.I):
         cells = re.findall(r"<t[dh][^>]*>([\s\S]*?)</t[dh]>", row, flags=re.I)
         texts = []
         for cell in cells:
-            text = unescape(re.sub(r"<[^>]+>", " ", cell))
-            text = text.replace("\xa0", " ")
-            text = re.sub(r"\s+", " ", text).strip()
-            texts.append(text)
+            text = unescape(re.sub(r"<[^>]+>", " ", cell)).replace("\xa0", " ")
+            texts.append(re.sub(r"\s+", " ", text).strip())
         if not texts:
             continue
         match = re.match(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", texts[0])
@@ -326,44 +424,36 @@ def parse_farside(html: str) -> list[dict]:
             continue
         rows.append({"t": int(dt.timestamp()), "total_musd": numbers[-1]})
     rows.sort(key=lambda item: item["t"])
-    dedup = []
-    seen = set()
+    dedup, seen = [], set()
     for row in rows:
-        if row["t"] in seen:
-            continue
-        seen.add(row["t"])
-        dedup.append(row)
+        if row["t"] not in seen:
+            seen.add(row["t"])
+            dedup.append(row)
     return dedup
 
 
 def fetch_etf_flows() -> list[dict]:
-    html = _get("https://farside.co.uk/btc/", accept="text/html").decode("utf-8", "replace")
+    try:
+        html = _get("https://bitbo.io/treasuries/etf-flows/", timeout=5.0, accept="text/html", user_agent=BROWSER_UA).decode("utf-8", "replace")
+        rows = parse_bitbo_flows(html)
+        if len(rows) >= 5:
+            return rows
+    except DataError:
+        pass
+    html = _get("https://farside.co.uk/btc/", timeout=5.0, accept="text/html", user_agent=UA).decode("utf-8", "replace")
     rows = parse_farside(html)
     if len(rows) < 5:
         raise DataError("ETF 资金表没有解析出足够的行")
     return rows
 
 
-def _yahoo_earnings(symbol: str) -> dict | None:
-    html = _get(f"https://finance.yahoo.com/quote/{urllib.parse.quote(symbol)}/", accept="text/html").decode(
-        "utf-8", "replace"
-    )
-    idx = html.find("earningsDate")
-    if idx < 0:
-        return None
-    chunk = html[idx : idx + 500]
-    dates = re.findall(r"20\d{2}-\d{2}-\d{2}", chunk)
-    if not dates:
-        return None
-    flag = chunk[chunk.find("isEarningsDateEstimate") : chunk.find("isEarningsDateEstimate") + 40]
-    return {"date": dates[0], "estimate": "true" in flag}
-
-
 def _nasdaq_earnings(symbol: str) -> str | None:
     payload = json.loads(
         _get(
             f"https://api.nasdaq.com/api/quote/{urllib.parse.quote(symbol)}/info?assetclass=stocks",
+            timeout=2.5,
             accept="application/json",
+            user_agent="Mozilla/5.0",
         )
     )
     notes = ((payload.get("data") or {}).get("notifications")) or []
@@ -378,36 +468,46 @@ def _nasdaq_earnings(symbol: str) -> str | None:
     return None
 
 
+def _yahoo_earnings(symbol: str) -> dict | None:
+    html = _get(f"https://finance.yahoo.com/quote/{urllib.parse.quote(symbol)}/", timeout=3.5, accept="text/html").decode("utf-8", "replace")
+    idx = html.find("earningsDate")
+    if idx < 0:
+        return None
+    chunk = html[idx : idx + 500]
+    dates = re.findall(r"20\d{2}-\d{2}-\d{2}", chunk)
+    if not dates:
+        return None
+    flag = chunk[chunk.find("isEarningsDateEstimate") : chunk.find("isEarningsDateEstimate") + 40]
+    return {"date": dates[0], "estimate": "true" in flag}
+
+
+def fetch_earnings_fast(symbol: str) -> dict | None:
+    try:
+        nasdaq = _nasdaq_earnings(symbol)
+    except DataError:
+        return None
+    if not nasdaq:
+        return None
+    year, month, day = [int(part) for part in nasdaq.split("-")]
+    stamp = int(datetime(year, month, day, 9, 30, tzinfo=NY).timestamp())
+    return {"t": stamp, "date": nasdaq, "estimate": False, "symbol": symbol}
+
+
 def fetch_earnings(symbol: str) -> dict | None:
-    yahoo = None
-    nasdaq = None
+    fast = fetch_earnings_fast(symbol)
+    if fast:
+        return fast
     try:
         yahoo = _yahoo_earnings(symbol)
     except DataError:
-        yahoo = None
-    if not (yahoo and not yahoo.get("estimate")):
-        try:
-            nasdaq = _nasdaq_earnings(symbol)
-        except DataError:
-            nasdaq = None
-    if yahoo and not yahoo.get("estimate"):
-        date, estimate = yahoo["date"], False
-    elif nasdaq:
-        date, estimate = nasdaq, False
-    elif yahoo:
-        date, estimate = yahoo["date"], True
-    else:
         return None
-    year, month, day = [int(part) for part in date.split("-")]
-    # Earnings times vary. Use 12:00 New York as a same-day marker, and say the clock is not the print time.
-    # 09:30 New York keeps the Shanghai calendar date aligned with the US session date.
-    # The clock is not the earnings release time.
+    if not yahoo:
+        return None
+    year, month, day = [int(part) for part in yahoo["date"].split("-")]
     stamp = int(datetime(year, month, day, 9, 30, tzinfo=NY).timestamp())
-    return {"t": stamp, "date": date, "estimate": estimate, "symbol": symbol}
+    return {"t": stamp, "date": yahoo["date"], "estimate": yahoo["estimate"], "symbol": symbol}
 
 
-# Verified fallback if a live calendar parse comes back short.
-# CPI/NFP/PPI times are 08:30 America/New_York. FOMC decisions are 14:00.
 def _ny(year, month, day, hour, minute=0) -> int:
     return int(datetime(year, month, day, hour, minute, tzinfo=NY).timestamp())
 
@@ -425,9 +525,24 @@ FALLBACK_EVENTS = [
     {"t": _ny(2026, 12, 9, 14), "kind": "fomc", "impact": "high", "title": "FOMC 利率决议（含经济预测）", "scope": "macro", "source": "federalreserve.gov"},
     {"t": _ny(2026, 12, 10, 8, 30), "kind": "cpi", "impact": "high", "title": "美国 CPI", "scope": "macro", "source": "bls.gov"},
     {"t": _ny(2026, 12, 15, 8, 30), "kind": "ppi", "impact": "high", "title": "美国 PPI", "scope": "macro", "source": "bls.gov"},
+    {"t": _ny(2027, 1, 8, 8, 30), "kind": "nfp", "impact": "high", "title": "美国非农就业", "scope": "macro", "source": "bls.gov"},
     {"t": _ny(2027, 1, 13, 8, 30), "kind": "cpi", "impact": "high", "title": "美国 CPI", "scope": "macro", "source": "bls.gov"},
     {"t": _ny(2027, 1, 27, 14), "kind": "fomc", "impact": "high", "title": "FOMC 利率决议", "scope": "macro", "source": "federalreserve.gov"},
 ]
+
+
+def fast_fallback_calendar() -> tuple[list[dict], list[str]]:
+    dedup, seen = [], set()
+    for event in sorted(FALLBACK_EVENTS, key=lambda item: item["t"]):
+        key = (event["kind"], datetime.fromtimestamp(event["t"], NY).strftime("%Y-%m-%d"))
+        if key in seen:
+            continue
+        seen.add(key)
+        when = datetime.fromtimestamp(event["t"], NY).strftime("%m-%d %H:%M")
+        row = dict(event)
+        row["title"] = f"{row['title']} · 美东 {when}"
+        dedup.append(row)
+    return dedup, []
 
 
 def fetch_macro_calendar() -> tuple[list[dict], list[str]]:
@@ -440,7 +555,7 @@ def fetch_macro_calendar() -> tuple[list[dict], list[str]]:
     ]
     for url, kind, title in pages:
         try:
-            html = _get(url, accept="text/html").decode("utf-8", "replace")
+            html = _get(url, timeout=4.5, accept="text/html").decode("utf-8", "replace")
             parsed = parse_bls_release_table(html, kind, title)
             if len(parsed) >= 4:
                 collected.extend(parsed)
@@ -449,9 +564,7 @@ def fetch_macro_calendar() -> tuple[list[dict], list[str]]:
         except DataError:
             notes.append(f"{title}页面暂时取不到，使用已核对日期")
     try:
-        html = _get("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", accept="text/html").decode(
-            "utf-8", "replace"
-        )
+        html = _get("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", timeout=4.5, accept="text/html").decode("utf-8", "replace")
         parsed = parse_fomc(html)
         if len(parsed) >= 6:
             collected.extend(parsed)
@@ -459,8 +572,7 @@ def fetch_macro_calendar() -> tuple[list[dict], list[str]]:
             notes.append("FOMC 页面解析不完整，保留已核对日期")
     except DataError:
         notes.append("FOMC 页面暂时取不到，使用已核对日期")
-    dedup = []
-    seen = set()
+    dedup, seen = [], set()
     start = int(datetime(2026, 1, 1, tzinfo=NY).timestamp())
     end = int(datetime(2028, 1, 1, tzinfo=NY).timestamp())
     for event in sorted(collected, key=lambda item: item["t"]):
@@ -471,7 +583,7 @@ def fetch_macro_calendar() -> tuple[list[dict], list[str]]:
             continue
         seen.add(key)
         when = datetime.fromtimestamp(event["t"], NY).strftime("%m-%d %H:%M")
-        event = dict(event)
-        event["title"] = f"{event['title']} · 美东 {when}"
-        dedup.append(event)
+        row = dict(event)
+        row["title"] = f"{row['title']} · 美东 {when}"
+        dedup.append(row)
     return dedup, notes

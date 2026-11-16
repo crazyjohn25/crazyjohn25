@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from engine.service import asset_view, board
-from engine.universe import BY_ID
+from engine.universe import BY_ID, normalize_horizon
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -42,8 +42,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/asset":
             query = parse_qs(parsed.query)
             asset_id = (query.get("id") or [""])[0]
-            horizon = (query.get("horizon") or ["swing"])[0]
-            if asset_id not in BY_ID or horizon not in {"swing", "intraday"}:
+            horizon = normalize_horizon((query.get("horizon") or ["1d"])[0])
+            if asset_id not in BY_ID or not horizon:
                 self._send(400, {"error": "未知标的或周期"})
                 return
             self._json(lambda: asset_view(asset_id, horizon))

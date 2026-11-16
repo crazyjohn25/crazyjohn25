@@ -1,4 +1,4 @@
-import { assetView, BY_ID } from "../../../lib/engine/service.mjs";
+import { assetView, BY_ID, normalizeHorizon } from "../../../lib/engine/service.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -7,8 +7,8 @@ export const maxDuration = 60;
 export async function GET(request) {
   const url = new URL(request.url);
   const assetId = url.searchParams.get("id") || "";
-  const horizon = url.searchParams.get("horizon") || "swing";
-  if (!Object.prototype.hasOwnProperty.call(BY_ID, assetId) || (horizon !== "swing" && horizon !== "intraday")) {
+  const horizon = normalizeHorizon(url.searchParams.get("horizon") || "1d");
+  if (!Object.prototype.hasOwnProperty.call(BY_ID, assetId) || !horizon) {
     return Response.json({ error: "未知标的或周期" }, { status: 400, headers: { "cache-control": "no-store" } });
   }
   try {
