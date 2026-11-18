@@ -1304,6 +1304,147 @@ h2 {
   }
 }
 
+.whale-wrap {
+  padding: 14px 24px 0;
+}
+
+.whale-board {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px 10px;
+}
+
+.whale-board h2 {
+  margin: 0 0 2px;
+  font-size: 18px;
+}
+
+.whale-head,
+.whale-tools,
+.whale-status,
+.whale-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.whale-head {
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.whale-status {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.whale-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.whale-dot.on {
+  background: var(--up);
+  box-shadow: 0 0 0 4px rgba(37, 194, 129, 0.15);
+}
+
+.whale-list {
+  max-height: 520px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.whale-empty,
+.whale-error {
+  margin: 8px 0 4px;
+  color: var(--muted);
+}
+
+.whale-error {
+  color: var(--down);
+}
+
+.whale-row {
+  display: grid;
+  grid-template-columns: 86px 64px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #0f1412;
+  border: 1px solid var(--line);
+}
+
+.whale-row.open {
+  border-color: rgba(227, 192, 111, 0.45);
+}
+
+.whale-time {
+  display: flex;
+  flex-direction: column;
+  font-variant-numeric: tabular-nums;
+}
+
+.whale-time b {
+  font-size: 16px;
+}
+
+.whale-time span,
+.whale-hash {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.whale-dir {
+  font-weight: 700;
+  text-align: center;
+  border-radius: 8px;
+  padding: 4px 0;
+}
+
+.whale-dir.long {
+  color: var(--up);
+  background: var(--up-bg);
+}
+
+.whale-dir.short {
+  color: var(--down);
+  background: var(--down-bg);
+}
+
+.whale-title b {
+  font-size: 15px;
+}
+
+.whale-addr,
+.whale-detail,
+.whale-account {
+  display: block;
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.whale-addr {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.whale-addr:hover,
+.whale-hash:hover {
+  color: var(--gold);
+}
+
 @media (max-width: 960px) {
   .layout {
     grid-template-columns: 1fr;
@@ -1331,6 +1472,12 @@ h2 {
   .split {
     grid-template-columns: 1fr;
     display: grid;
+  }
+  .whale-row {
+    grid-template-columns: 74px 56px minmax(0, 1fr);
+  }
+  .whale-hash {
+    grid-column: 2;
   }
   .top {
     flex-direction: column;

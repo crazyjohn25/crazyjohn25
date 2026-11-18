@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ProChart from "./pro-chart";
 import SimWallet from "./sim-wallet";
+import WhaleBoard from "./whale-board";
 
 const GROUPS = {
   trend: "趋势方向组",
@@ -437,6 +438,10 @@ export default function DeskClient({ initialBoard = null, initialView = null }) 
         </section>
       ) : null}
 
+      <div className="whale-wrap">
+        <WhaleBoard />
+      </div>
+
       <div className="sim-wrap">
         <SimWallet board={boardData} liveAssetId={assetId} livePrice={shownPrice} />
       </div>
@@ -863,7 +868,7 @@ export default function DeskClient({ initialBoard = null, initialView = null }) 
               ) : null}
 
               <p className="source">
-                数据源：加密货币实时 K 线与秒级流来自 Binance (BTCUSDT / HYPEUSDT) 及 Hyperliquid 历史；美股与指数来自 Nasdaq / Yahoo Finance（含 SpaceX 纳斯达克代码 SPCX）；ETF 资金流来自 Bitbo / Farside；宏观日程来自美联储与美国劳工统计局。所有量化评分与价位测算仅供客观决策辅助，不构成收益承诺。
+                数据源：加密货币实时 K 线与秒级流来自 Binance (BTCUSDT / HYPEUSDT) 及 Hyperliquid 历史；大额开仓播报来自 Hyperliquid 主网公开成交和吃单地址的成交记录；美股与指数来自 Nasdaq / Yahoo Finance（含 SpaceX 纳斯达克代码 SPCX）；ETF 资金流来自 Bitbo / Farside；宏观日程来自美联储与美国劳工统计局。所有量化评分与价位测算仅供客观决策辅助，不构成收益承诺。
               </p>
             </>
           ) : null}
