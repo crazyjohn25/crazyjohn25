@@ -51,6 +51,142 @@ function tone(value, threshold = 8) {
   return Number(value) > 0 ? "up" : "down";
 }
 
+const SIZE_LABEL = {
+  full: "新仓可按执行档仓位上限分批",
+  half: "同向周期不全，新仓按执行档上限减半",
+  none: "不新开仓",
+};
+
+function AdviceBoard({ plans, synthesis, digits, activeHorizon, onFocusHorizon }) {
+  if (!synthesis) return null;
+  const rows = plans || [];
+  const operate = rows.find((plan) => plan.id === synthesis.operate_id);
+  return (
+    <section className="synthesis-card panel">
+      <div className="playbook-header">
+        <h2>综合结论</h2>
+        <span className="muted">短线 20% · 中线 35% · 长线 45%</span>
+      </div>
+      <div className="synthesis-headline-row">
+        <strong className={tone(synthesis.composite_score, 18)}>{synthesis.headline}</strong>
+        {synthesis.composite_score != null ? (
+          <span className={`score-pill ${tone(synthesis.composite_score, 18)}`}>
+            加权 {signed(synthesis.composite_score, 0)}
+          </span>
+        ) : null}
+      </div>
+      <p className="synthesis-thesis">{synthesis.thesis}</p>
+      <div className="synthesis-meta">
+        <span>共振：{synthesis.alignment}</span>
+        <span>信心：{synthesis.confidence}</span>
+        <span>仓位：{SIZE_LABEL[synthesis.size] || SIZE_LABEL.none}</span>
+        <span>
+          执行档：{synthesis.actionable && operate ? operate.label : "暂不指定"}
+        </span>
+      </div>
+      {operate?.ok && synthesis.actionable && operate.bias !== "neutral" ? (
+        <div className="levels-grid synthesis-levels">
+          <div className="level-item">
+            <span>{operate.label}开仓区 · {operate.zone_title}</span>
+            <b className="num flat">{fmt(operate.entry_low, digits)} – {fmt(operate.entry_high, digits)}</b>
+            <small className="muted">{synthesis.actionable ? "只在这个区间分批，不追当前价" : "当前不新开仓，这个区间只供核对"}</small>
+          </div>
+          <div className="level-item">
+            <span>SL 止损 / 结构失效</span>
+            <b className="num down">
+              {fmt(operate.stop, digits)}
+              {operate.stop_pct != null ? ` (${signed(operate.stop_pct, 2)}%)` : ""}
+            </b>
+            <small className="muted">收盘越过该价，这笔执行档逻辑作废</small>
+          </div>
+          <div className="level-item">
+            <span>TP1 / TP2 止盈</span>
+            <b className="num up">{fmt(operate.tp1, digits)} / {fmt(operate.tp2, digits)}</b>
+            <small className="muted">TP1 先减仓，TP2 是结构延伸目标</small>
+          </div>
+          <div className="level-item">
+            <span>回踩盈亏比 · 仓位上限</span>
+            <b className="num">{operate.rr_pullback ?? "—"} : 1</b>
+            <small className="muted">{operate.position_cap}</small>
+          </div>
+        </div>
+      ) : null}
+      <div className="horizon-plan-grid">
+        {rows.map((plan) => (
+          <article
+            key={plan.id}
+            className={`horizon-plan${activeHorizon === plan.horizon ? " viewing" : ""}${synthesis.actionable && synthesis.operate_id === plan.id ? " execute" : ""}`}
+          >
+            <header>
+              <div>
+                <b>{plan.label}</b>
+                <span className="muted">{plan.hold}</span>
+              </div>
+              {plan.ok ? (
+                <span className={`score-pill ${tone(plan.action_score, 18)}`}>{signed(plan.action_score, 0)}</span>
+              ) : (
+                <span className="score-pill flat">样本不足</span>
+              )}
+            </header>
+            <p className="horizon-role">{plan.role}</p>
+            {plan.ok ? (
+              <>
+                <p className={`horizon-verdict ${plan.verdict_tone || "flat"}`}>{plan.verdict_title}</p>
+                {plan.bias === "neutral" ? (
+                  <dl>
+                    <div>
+                      <dt>区间下沿</dt>
+                      <dd>{fmt(plan.entry_low, digits)}</dd>
+                    </div>
+                    <div>
+                      <dt>区间上沿</dt>
+                      <dd>{fmt(plan.entry_high, digits)}</dd>
+                    </div>
+                    <div>
+                      <dt>失效参考</dt>
+                      <dd className="down">{fmt(plan.stop, digits)}</dd>
+                    </div>
+                    <div>
+                      <dt>止盈</dt>
+                      <dd>无单边目标</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <dl>
+                    <div>
+                      <dt>开仓</dt>
+                      <dd>{fmt(plan.entry_low, digits)} – {fmt(plan.entry_high, digits)}</dd>
+                    </div>
+                    <div>
+                      <dt>SL</dt>
+                      <dd className="down">{fmt(plan.stop, digits)}</dd>
+                    </div>
+                    <div>
+                      <dt>TP1</dt>
+                      <dd className="up">{fmt(plan.tp1, digits)}</dd>
+                    </div>
+                    <div>
+                      <dt>TP2</dt>
+                      <dd className="up">{fmt(plan.tp2, digits)}</dd>
+                    </div>
+                  </dl>
+                )}
+                <p className="horizon-action">{plan.bias === "short" ? plan.swing_action : plan.spot_action}</p>
+                <button type="button" className="chip-btn" onClick={() => onFocusHorizon(plan.horizon)}>
+                  {activeHorizon === plan.horizon ? "当前正在看这张图" : "在 K 线上查看这一档"}
+                </button>
+              </>
+            ) : (
+              <p className="muted">{plan.reason}</p>
+            )}
+          </article>
+        ))}
+      </div>
+      <p className="note">{synthesis.method}</p>
+    </section>
+  );
+}
+
 function shortActionTag(score) {
   if (score == null || Number.isNaN(Number(score))) return "待核对";
   const v = Number(score);
@@ -397,6 +533,14 @@ export default function DeskClient({ initialBoard = null, initialView = null }) 
                 <p key={w} className="warn">{w}</p>
               ))}
 
+              <AdviceBoard
+                plans={view.horizon_plans}
+                synthesis={view.synthesis}
+                digits={digits}
+                activeHorizon={horizon}
+                onFocusHorizon={handleSelectHorizon}
+              />
+
               {/* Score Thermometer + Faithful Investment Playbook */}
               {score.ok && playbook ? (
                 <section className="decision-board">
@@ -474,52 +618,56 @@ export default function DeskClient({ initialBoard = null, initialView = null }) 
                   {/* Actionable Playbook */}
                   <div className="playbook-card panel">
                     <div className="playbook-header">
-                      <h2>忠实投资决策建议（{view.horizon_label}视角 · 对照{view.higher_label}）</h2>
-                      <span className="muted">客观量化推演 · 绝不报喜不报忧</span>
+                      <h2>当前图周期的证据（{view.horizon_label} · 对照{view.higher_label}）</h2>
+                      <span className="muted">开仓、止盈、止损以短线 / 中线 / 长线三档为准</span>
                     </div>
 
-                    <div className="advice-columns">
-                      <div className="advice-box">
-                        <span className="advice-role">现货 / 美股长波段建议</span>
-                        <p>{playbook.spot_action}</p>
-                      </div>
-                      <div className="advice-box">
-                        <span className="advice-role">短波段 / 双向交易执行纪律</span>
-                        <p>{playbook.swing_action}</p>
-                      </div>
-                    </div>
+                    {view.synthesis ? null : (
+                      <>
+                        <div className="advice-columns">
+                          <div className="advice-box">
+                            <span className="advice-role">现货 / 美股长波段建议</span>
+                            <p>{playbook.spot_action}</p>
+                          </div>
+                          <div className="advice-box">
+                            <span className="advice-role">短波段 / 双向交易执行纪律</span>
+                            <p>{playbook.swing_action}</p>
+                          </div>
+                        </div>
 
-                    <div className="levels-grid">
-                      <div className="level-item">
-                        <span>{playbook.zone_title}</span>
-                        <b className="num flat">
-                          {fmt(playbook.entry_low, digits)} – {fmt(playbook.entry_high, digits)}
-                        </b>
-                        <small className="muted">避免现价情绪化追单的参考带</small>
-                      </div>
-                      <div className="level-item">
-                        <span>结构止损 / 逻辑失效位</span>
-                        <b className="num down">
-                          {fmt(playbook.stop_level, digits)}
-                          {playbook.stop_pct != null ? ` (${signed(playbook.stop_pct, 2)}%)` : ""}
-                        </b>
-                        <small className="muted">收盘破此价位说明判断出错，无条件止损</small>
-                      </div>
-                      <div className="level-item">
-                        <span>客观阻力 / 阶段参考目标</span>
-                        <b className="num up">
-                          T1: {fmt(playbook.target_1, digits)} · T2: {fmt(playbook.target_2, digits)}
-                        </b>
-                        <small className="muted">20 周期前高前低与 ATR 波动包络测算</small>
-                      </div>
-                      <div className="level-item">
-                        <span>潜在盈亏比 & 建议仓位上限</span>
-                        <b className="num">
-                          现价 {playbook.rr_now ?? "—"}:1（回踩 {playbook.rr_pullback ?? "—"}:1）
-                        </b>
-                        <small className="muted">建议仓位：{playbook.position_cap}</small>
-                      </div>
-                    </div>
+                        <div className="levels-grid">
+                          <div className="level-item">
+                            <span>{playbook.zone_title}</span>
+                            <b className="num flat">
+                              {fmt(playbook.entry_low, digits)} – {fmt(playbook.entry_high, digits)}
+                            </b>
+                            <small className="muted">避免现价情绪化追单的参考带</small>
+                          </div>
+                          <div className="level-item">
+                            <span>结构止损 / 逻辑失效位</span>
+                            <b className="num down">
+                              {fmt(playbook.stop_level, digits)}
+                              {playbook.stop_pct != null ? ` (${signed(playbook.stop_pct, 2)}%)` : ""}
+                            </b>
+                            <small className="muted">收盘破此价位说明判断出错，无条件止损</small>
+                          </div>
+                          <div className="level-item">
+                            <span>客观阻力 / 阶段参考目标</span>
+                            <b className="num up">
+                              T1: {fmt(playbook.target_1, digits)} · T2: {fmt(playbook.target_2, digits)}
+                            </b>
+                            <small className="muted">20 周期前高前低与 ATR 波动包络测算</small>
+                          </div>
+                          <div className="level-item">
+                            <span>潜在盈亏比 & 建议仓位上限</span>
+                            <b className="num">
+                              现价 {playbook.rr_now ?? "—"}:1（回踩 {playbook.rr_pullback ?? "—"}:1）
+                            </b>
+                            <small className="muted">建议仓位：{playbook.position_cap}</small>
+                          </div>
+                        </div>
+                      </>
+                    )}
 
                     <div className="pros-cons-balance">
                       <div className="balance-col bull-col">
@@ -570,6 +718,8 @@ export default function DeskClient({ initialBoard = null, initialView = null }) 
                 onHorizonChange={handleSelectHorizon}
                 onLiveTick={handleLiveTick}
                 loadingHorizon={loadingHorizon}
+                plans={view.horizon_plans}
+                synthesis={view.synthesis}
               />
 
               {/* Macro/Earnings Timeline + Real-time News */}
