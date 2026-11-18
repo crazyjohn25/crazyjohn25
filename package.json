@@ -5,7 +5,7 @@
     "dev": "next dev --hostname 127.0.0.1 --port 8766",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 8766",
-    "test:web": "node --test lib/engine/parity.test.mjs lib/engine/sim-wallet.test.mjs"
+    "test:web": "node --test lib/engine/parity.test.mjs lib/engine/sim-wallet.test.mjs lib/engine/hl-tape.test.mjs"
   },
   "dependencies": {
     "lightweight-charts": "^4.2.3",
