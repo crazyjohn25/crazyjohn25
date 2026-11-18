@@ -141,6 +141,67 @@ function TradingViewNativeEmbed({ symbol, tvInterval }) {
   return <div ref={containerRef} className="tv-embed-box" />;
 }
 
+function chartBox(pageMode) {
+  const viewport = window.visualViewport;
+  const vh = viewport?.height || window.innerHeight || 800;
+  const vw = viewport?.width || window.innerWidth || 1280;
+  const oscH = Math.round(Math.max(108, Math.min(vh * (pageMode ? 0.16 : 0.14), pageMode ? 190 : 160)));
+  let mainH;
+  if (pageMode) {
+    const chrome = vw < 980 ? 236 : 188;
+    mainH = Math.max(220, Math.round(vh - chrome - oscH));
+  } else {
+    mainH = Math.round(Math.max(300, Math.min(vh * 0.56, 720)));
+  }
+  const barSpacing = vw >= 1700 ? (pageMode ? 10 : 8.6) : vw < 860 ? 5.4 : pageMode ? 8.2 : 7;
+  return { mainH, oscH, barSpacing, vw };
+}
+
+function ChartDock({ plans, synthesis, digits, horizon, onHorizonChange }) {
+  if (!synthesis && !(plans || []).length) return null;
+  const operate = (plans || []).find((plan) => plan.id === synthesis?.operate_id);
+  return (
+    <aside className="chart-dock" aria-label="短中长三档价位">
+      <p className="dock-kicker">全页看盘 · 三档开仓 / 止盈 / 止损</p>
+      {synthesis?.ok ? <h3>{synthesis.headline}</h3> : null}
+      {synthesis?.ok ? <p className="dock-operate">{synthesis.actionable ? `建议按${operate?.label || "执行档"}执行。` : "这些价位只供核对，当前不建议开新仓。"}</p> : null}
+      {(plans || []).map((plan) => (
+        <button
+          key={plan.id}
+          type="button"
+          className={`dock-plan${horizon === plan.horizon ? " on" : ""}${synthesis?.actionable && synthesis?.operate_id === plan.id ? " execute" : ""}`}
+          onClick={() => plan.ok && onHorizonChange(plan.horizon)}
+        >
+          <span className="dock-plan-top">
+            <b>{plan.label}</b>
+            <span>{plan.ok ? `${plan.action_score > 0 ? "+" : ""}${Math.round(plan.action_score)}` : "样本不足"}</span>
+          </span>
+          {plan.ok ? (
+            <span className="dock-levels">
+              {plan.bias === "neutral" ? (
+                <>
+                  区间 {fmtNum(plan.entry_low, digits)} – {fmtNum(plan.entry_high, digits)}
+                  <br />
+                  失效参考 {fmtNum(plan.stop, digits)} · 无单边止盈
+                </>
+              ) : (
+                <>
+                  开仓 {fmtNum(plan.entry_low, digits)} – {fmtNum(plan.entry_high, digits)}
+                  <br />
+                  SL {fmtNum(plan.stop, digits)} · TP1 {fmtNum(plan.tp1, digits)} · TP2 {fmtNum(plan.tp2, digits)}
+                </>
+              )}
+            </span>
+          ) : (
+            <span className="dock-levels">{plan.reason}</span>
+          )}
+        </button>
+      ))}
+      <p className="muted dock-exit">按 Esc 退出全页。点某一档会切到对应 K 线。</p>
+    </aside>
+  );
+}
+
 export default function ProChart({
   view,
   horizon,
@@ -148,11 +209,13 @@ export default function ProChart({
   onHorizonChange,
   onLiveTick,
   loadingHorizon,
+  plans = null,
+  synthesis = null,
 }) {
   const [chartMode, setChartMode] = useState("pro");
   const [osc, setOsc] = useState("macd");
   const [logScale, setLogScale] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [pageMode, setPageMode] = useState(false);
   const [wsState, setWsState] = useState("idle");
   const [hoverBar, setHoverBar] = useState(null);
   const [overlays, setOverlays] = useState({
@@ -168,6 +231,7 @@ export default function ProChart({
   const mainRef = useRef(null);
   const oscRef = useRef(null);
   const apiRef = useRef(null);
+  const stageRef = useRef(null);
   const candlesMapRef = useRef(new Map());
 
   const candles = view?.candles || [];
@@ -182,6 +246,20 @@ export default function ProChart({
     () => (horizons || []).find((h) => h.key === horizon) || { tv_interval: "D" },
     [horizons, horizon],
   );
+
+  useEffect(() => {
+    if (!pageMode) return undefined;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (event) => {
+      if (event.key === "Escape") setPageMode(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previous;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [pageMode]);
 
   // Build and update Lightweight Charts instance
   useEffect(() => {
@@ -199,6 +277,19 @@ export default function ProChart({
       const ts = typeof time === "number" ? time : 0;
       return intervalSec >= 86400 ? SH_DAY.format(new Date(ts * 1000)) : SH_HM.format(new Date(ts * 1000));
     };
+
+    const resolveHeights = () => {
+      const next = chartBox(pageMode);
+      const host = stageRef.current;
+      if (!pageMode || !host || host.clientHeight < 240) return next;
+      const ohlc = host.querySelector(".ohlc-strip")?.offsetHeight || 0;
+      const oscBar = host.querySelector(".osc-bar")?.offsetHeight || 34;
+      return {
+        ...next,
+        mainH: Math.max(200, host.clientHeight - ohlc - oscBar - next.oscH),
+      };
+    };
+    const box = resolveHeights();
 
     const commonOpts = {
       layout: {
@@ -222,24 +313,26 @@ export default function ProChart({
       },
       rightPriceScale: {
         borderColor: "#28322c",
-        minimumWidth: 76,
+        minimumWidth: box.vw < 760 ? 64 : 86,
       },
       timeScale: {
         borderColor: "#28322c",
         timeVisible: intervalSec < 86400,
         secondsVisible: false,
-        rightOffset: 6,
-        barSpacing: expanded ? 9 : 7.5,
+        rightOffset: pageMode ? 12 : 8,
+        barSpacing: box.barSpacing,
         tickMarkFormatter: tickFormatter,
       },
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     };
 
-    const mainHeight = expanded ? 520 : 390;
+    const mainHeight = box.mainH;
+    mainEl.style.height = `${mainHeight}px`;
+    oscEl.style.height = `${box.oscH}px`;
     const mainChart = createChart(mainEl, {
       ...commonOpts,
-      width: mainEl.clientWidth,
+      width: Math.max(10, Math.floor(mainEl.clientWidth)),
       height: mainHeight,
       rightPriceScale: {
         ...commonOpts.rightPriceScale,
@@ -250,8 +343,8 @@ export default function ProChart({
 
     const oscChart = createChart(oscEl, {
       ...commonOpts,
-      width: oscEl.clientWidth,
-      height: 148,
+      width: Math.max(10, Math.floor(oscEl.clientWidth || mainEl.clientWidth)),
+      height: box.oscH,
       rightPriceScale: {
         ...commonOpts.rightPriceScale,
         scaleMargins: { top: 0.12, bottom: 0.12 },
@@ -353,36 +446,26 @@ export default function ProChart({
     }
 
     if (overlays.levels && playbook) {
-      if (playbook.stop_level != null) {
+      const addLevel = (price, color, title, style = LineStyle.Dashed) => {
+        if (price == null || !Number.isFinite(Number(price))) return;
         candleSeries.createPriceLine({
-          price: playbook.stop_level,
-          color: "#ef5350",
+          price: Number(price),
+          color,
           lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
+          lineStyle: style,
           axisLabelVisible: true,
-          title: "止损/失效位",
+          title,
         });
-      }
-      if (playbook.entry_low != null && playbook.entry_high != null) {
-        const entryRef = playbook.bias === "short" ? playbook.entry_low : playbook.entry_high;
-        candleSeries.createPriceLine({
-          price: entryRef,
-          color: "#e3c06f",
-          lineWidth: 1,
-          lineStyle: LineStyle.Dotted,
-          axisLabelVisible: true,
-          title: playbook.bias === "short" ? "反抽阻力沿" : "回踩关注沿",
-        });
-      }
-      if (playbook.target_1 != null && playbook.bias !== "neutral") {
-        candleSeries.createPriceLine({
-          price: playbook.target_1,
-          color: "#26a69a",
-          lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: "目标参考 T1",
-        });
+      };
+      addLevel(playbook.stop_level, "#ef5350", playbook.bias === "neutral" ? "失效参考" : "SL 止损");
+      if (playbook.bias === "neutral") {
+        addLevel(playbook.entry_low, "#e3c06f", "区间下沿", LineStyle.Dotted);
+        addLevel(playbook.entry_high, "#e3c06f", "区间上沿", LineStyle.Dotted);
+      } else {
+        addLevel(playbook.entry_low, "#e3c06f", "开仓下沿", LineStyle.Dotted);
+        addLevel(playbook.entry_high, "#f0d78c", "开仓上沿", LineStyle.Dotted);
+        addLevel(playbook.target_1, "#26a69a", "TP1");
+        addLevel(playbook.target_2, "#7dcea0", "TP2");
       }
     }
 
@@ -433,8 +516,9 @@ export default function ProChart({
 
     // Show recent ~110 candles initially while keeping all 320 scrollable
     const total = candles.length;
-    if (total > 120) {
-      const range = { from: total - 115, to: total + 6 };
+    const visibleBars = Math.round((Math.max(320, mainEl.clientWidth) / box.barSpacing));
+    if (total > visibleBars) {
+      const range = { from: Math.max(0, total - visibleBars + 6), to: total + 6 };
       mainChart.timeScale().setVisibleLogicalRange(range);
       oscChart.timeScale().setVisibleLogicalRange(range);
     } else {
@@ -466,23 +550,41 @@ export default function ProChart({
       if (hit) setHoverBar(hit);
     });
 
-    const onResize = () => {
+    const applySize = () => {
       if (!mainEl || !oscEl) return;
-      mainChart.applyOptions({ width: mainEl.clientWidth });
-      oscChart.applyOptions({ width: oscEl.clientWidth });
+      const next = resolveHeights();
+      mainEl.style.height = `${next.mainH}px`;
+      oscEl.style.height = `${next.oscH}px`;
+      mainChart.applyOptions({
+        width: Math.max(10, Math.floor(mainEl.clientWidth)),
+        height: next.mainH,
+      });
+      oscChart.applyOptions({
+        width: Math.max(10, Math.floor(oscEl.clientWidth || mainEl.clientWidth)),
+        height: next.oscH,
+      });
     };
-    const ro = new ResizeObserver(onResize);
+    const raf = requestAnimationFrame(applySize);
+    const ro = new ResizeObserver(() => {
+      mainChart.applyOptions({ width: Math.max(10, Math.floor(mainEl.clientWidth)) });
+      oscChart.applyOptions({ width: Math.max(10, Math.floor(oscEl.clientWidth || mainEl.clientWidth)) });
+    });
     ro.observe(mainEl);
+    window.addEventListener("resize", applySize);
+    window.visualViewport?.addEventListener("resize", applySize);
 
     apiRef.current = { mainChart, oscChart, candleSeries, volSeries };
 
     return () => {
+      cancelAnimationFrame(raf);
       ro.disconnect();
+      window.removeEventListener("resize", applySize);
+      window.visualViewport?.removeEventListener("resize", applySize);
       apiRef.current = null;
       mainChart.remove();
       oscChart.remove();
     };
-  }, [chartMode, candles, digits, intervalSec, logScale, expanded, osc, overlays, playbook, view?.events]);
+  }, [chartMode, candles, digits, intervalSec, logScale, pageMode, osc, overlays, playbook, view?.events]);
 
   // Direct Binance Live WebSocket stream for real-time ticks on BTC & HYPE
   useEffect(() => {
@@ -570,7 +672,7 @@ export default function ProChart({
       : null;
 
   return (
-    <section className={`panel chart-panel${expanded ? " chart-expanded" : ""}`}>
+    <section className={`panel chart-panel${pageMode ? " chart-page" : ""}`}>
       <div className="chart-header-bar">
         <div className="mode-tabs" role="tablist" aria-label="图表引擎">
           <button
@@ -650,18 +752,20 @@ export default function ProChart({
               <button type="button" className="chip-btn" onClick={resetView}>
                 复位缩放
               </button>
-              <button
-                type="button"
-                className={`chip-btn${expanded ? " on" : ""}`}
-                onClick={() => setExpanded((v) => !v)}
-              >
-                {expanded ? "收起高度" : "加高看盘"}
-              </button>
             </div>
           </>
         ) : null}
+        <button
+          type="button"
+          className={`chip-btn page-btn${pageMode ? " on" : ""}`}
+          onClick={() => setPageMode((value) => !value)}
+        >
+          {pageMode ? "退出全页" : "全页观看"}
+        </button>
       </div>
 
+      <div className="chart-stage">
+        <div className="chart-canvases" ref={stageRef}>
       {chartMode === "pro" ? (
         <>
           {activeBar ? (
@@ -723,6 +827,17 @@ export default function ProChart({
           tvInterval={currentHorizonMeta.tv_interval}
         />
       )}
+        </div>
+        {pageMode ? (
+          <ChartDock
+            plans={plans}
+            synthesis={synthesis}
+            digits={digits}
+            horizon={horizon}
+            onHorizonChange={onHorizonChange}
+          />
+        ) : null}
+      </div>
     </section>
   );
 }

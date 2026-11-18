@@ -651,6 +651,224 @@ h1 {
   margin-bottom: 4px;
 }
 
+.synthesis-card {
+  margin-bottom: 14px;
+}
+
+.synthesis-headline-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.synthesis-headline-row strong {
+  font-size: 20px;
+  line-height: 1.35;
+}
+
+.synthesis-thesis {
+  margin: 0 0 10px;
+  font-size: 14.5px;
+  color: #e7f0ea;
+}
+
+.synthesis-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.synthesis-levels {
+  margin-bottom: 12px;
+}
+
+.horizon-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.horizon-plan {
+  background: #17201b;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.horizon-plan.execute {
+  border-color: rgba(227, 192, 111, 0.7);
+}
+
+.horizon-plan.viewing {
+  box-shadow: inset 0 0 0 1px rgba(89, 169, 255, 0.45);
+}
+
+.horizon-plan header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.horizon-plan header b {
+  display: block;
+  font-size: 16px;
+}
+
+.horizon-plan header .muted {
+  display: block;
+  font-size: 12px;
+}
+
+.horizon-role,
+.horizon-action {
+  margin: 6px 0;
+  font-size: 12.5px;
+  color: #d5e2da;
+}
+
+.horizon-verdict {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.horizon-plan dl {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 8px;
+  margin: 8px 0;
+}
+
+.horizon-plan dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.horizon-plan dd {
+  margin: 0;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-stage {
+  min-width: 0;
+}
+
+.chart-canvases {
+  min-width: 0;
+  width: 100%;
+}
+
+.chart-panel.chart-page {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.chart-panel.chart-page .chart-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.chart-panel.chart-page .chart-canvases {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chart-panel.chart-page .tv-embed-box {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+.page-btn {
+  margin-left: auto;
+}
+
+.chart-dock {
+  width: min(320px, 32vw);
+  overflow: auto;
+  border-left: 1px solid var(--line);
+  padding: 0 4px 8px 12px;
+}
+
+.dock-kicker {
+  margin: 0 0 6px;
+  color: var(--gold);
+  font-size: 12px;
+}
+
+.chart-dock h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.dock-operate,
+.dock-exit {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+}
+
+.dock-plan {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: #17201b;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.dock-plan.execute {
+  border-color: rgba(227, 192, 111, 0.7);
+}
+
+.dock-plan.on {
+  box-shadow: inset 0 0 0 1px rgba(89, 169, 255, 0.5);
+}
+
+.dock-plan-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dock-levels {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  line-height: 1.45;
+}
+
 /* Pro Chart */
 .chart-panel {
   padding: 12px 14px;
@@ -795,6 +1013,7 @@ h1 {
 
 .lw-main-canvas {
   width: 100%;
+  max-width: 100%;
   border: 1px solid var(--line);
   overflow: hidden;
 }
@@ -818,6 +1037,7 @@ h1 {
 
 .lw-osc-canvas {
   width: 100%;
+  max-width: 100%;
   border: 1px solid var(--line);
   border-radius: 0 0 8px 8px;
   overflow: hidden;
@@ -825,7 +1045,8 @@ h1 {
 
 .tv-embed-box {
   width: 100%;
-  height: 560px;
+  height: min(68vh, 820px);
+  min-height: 360px;
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
@@ -971,6 +1192,19 @@ h2 {
   }
 }
 
+@media (max-width: 860px) {
+  .chart-panel.chart-page .chart-stage {
+    flex-direction: column;
+  }
+  .chart-dock {
+    width: auto;
+    max-height: 30dvh;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+  }
+}
+
 @media (max-width: 960px) {
   .layout {
     grid-template-columns: 1fr;
@@ -993,6 +1227,7 @@ h2 {
   .sub-scores-grid,
   .advice-columns,
   .pros-cons-balance,
+  .horizon-plan-grid,
   .split {
     grid-template-columns: 1fr;
     display: grid;
