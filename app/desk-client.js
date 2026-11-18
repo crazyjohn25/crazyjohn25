@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ProChart from "./pro-chart";
+import SimWallet from "./sim-wallet";
 
 const GROUPS = {
   trend: "趋势方向组",
@@ -435,6 +436,10 @@ export default function DeskClient({ initialBoard = null, initialView = null }) 
           </div>
         </section>
       ) : null}
+
+      <div className="sim-wrap">
+        <SimWallet board={boardData} liveAssetId={assetId} livePrice={shownPrice} />
+      </div>
 
       <div className="layout">
         <aside id="rail" aria-label="监控标的">

@@ -1183,9 +1183,108 @@ h2 {
   margin-top: 8px;
 }
 
+.sim-wrap {
+  padding: 14px 24px 0;
+}
+
+.sim-wallet h2 {
+  margin-bottom: 2px;
+}
+
+.sim-head,
+.sim-forms,
+.sim-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sim-head {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.sim-stats {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sim-stats div {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.sim-stats span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sim-stats b {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 16px;
+}
+
+.sim-goal {
+  margin-bottom: 10px;
+}
+
+.sim-form {
+  background: #17201b;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.sim-input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  min-width: 88px;
+}
+
+.sim-lev {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--gold);
+  font-variant-numeric: tabular-nums;
+}
+
+.sim-lev input {
+  width: 120px;
+}
+
+.sim-notes {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #d5e2da;
+  font-size: 12.5px;
+}
+
+.sim-table-wrap {
+  overflow-x: auto;
+}
+
+.sim-auto.on {
+  background: var(--up-bg);
+  color: var(--up);
+  border-color: rgba(37, 194, 129, 0.45);
+}
+
 @media (max-width: 1080px) {
   .levels-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+  .sim-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .explainer-grid {
     grid-template-columns: 1fr;
@@ -1228,6 +1327,7 @@ h2 {
   .advice-columns,
   .pros-cons-balance,
   .horizon-plan-grid,
+  .sim-stats,
   .split {
     grid-template-columns: 1fr;
     display: grid;
